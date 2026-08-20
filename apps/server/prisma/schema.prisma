@@ -1,0 +1,648 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ──────────────── Auth & Multi-Tenancy ────────────────
+
+model User {
+  id                       String         @id @default(cuid())
+  email                    String         @unique
+  name                     String?
+  passwordHash             String
+  role                     String         @default("client") // "client" | "admin"
+  companyName              String?
+  phone                    String?
+  onboarded                Boolean        @default(false)
+  stripeConnectAccountId   String?
+  stripeOnboardingComplete Boolean        @default(false)
+  failedLoginAttempts      Int            @default(0)
+  lockedUntil              DateTime?
+  resetToken               String?
+  resetTokenExpiry         DateTime?
+  properties               Property[]
+  sessions                 Session[]
+  websiteConfig            WebsiteConfig?
+  subscription             Subscription?
+  sentMessages             Message[]      @relation("SentByUser")
+  auditLogs                AuditLog[]
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ──────────────── Properties ────────────────
+
+model Property {
+  id               String          @id @default(cuid())
+  name             String
+  address          String
+  unitCount        Int?
+  twilioPhone      String?         @unique
+  twilioPhoneSid   String?
+  smsIntakeEnabled Boolean         @default(false)
+  intakeAutoReply  String?
+  description      String?
+  isActive         Boolean         @default(false)
+  userId           String
+  user             User            @relation(fields: [userId], references: [id])
+  aiModel          String          @default("gpt-4o-mini-realtime-preview")
+  voiceName        String          @default("alloy")
+  maxCallMinutes   Int             @default(15)
+  recordingEnabled Boolean         @default(false)
+  answerValidation Boolean         @default(false)
+  aiDisclosureText String?
+  greetingMessage  String?
+  cookCounty       Boolean         @default(false)
+  petPolicy        String?
+  amenities        String[]
+  questions            Question[]
+  applications         Application[]
+  callLogs             CallLog[]
+  units                Unit[]
+  photos               PropertyPhoto[]
+  tourSlots            TourSlot[]
+  tourBookings         TourBooking[]
+  maintenanceRequests  MaintenanceRequest[]
+  surveyInvites        SurveyInvite[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([userId])
+}
+
+model PropertyPhoto {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  url        String
+  caption    String?
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([propertyId, sortOrder])
+}
+
+// ──────────────── Questions ────────────────
+
+model Question {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  text       String
+  fieldKey   String
+  type       String   @default("text") // text, yes_no, number, date
+  required   Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  isStandard Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([propertyId, sortOrder])
+}
+
+// ──────────────── Applications ────────────────
+
+model Application {
+  id              String    @id @default(cuid())
+  propertyId      String
+  property        Property  @relation(fields: [propertyId], references: [id])
+  status          String    @default("in_progress") // in_progress | completed | reviewed | rejected
+  channel         String // "voice" | "sms" | "web" | "sms_link"
+  callerPhone     String?
+  fullName        String?
+  dateOfBirth     String? // Encrypted
+  ssn             String? // Encrypted
+  email           String?
+  currentAddress  String?
+  monthlyIncome   String?
+  employer        String?
+  employerPhone   String?
+  rentalHistory   Json?
+  references      Json?
+  hasPets         Boolean?
+  petDetails      String?
+  moveInDate      String?
+  vehicles        Json?
+  customResponses Json?
+  reviewNotes     String?
+  reviewedAt      DateTime?
+
+  callLogId        String?           @unique
+  callLog          CallLog?          @relation(fields: [callLogId], references: [id])
+  smsConversations SmsConversation[]
+  surveyInvite     SurveyInvite?
+  completedAt      DateTime?
+  forwardedAt      DateTime? // SMS relay: owner summary confirmed sent
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@index([propertyId, status])
+  @@index([callerPhone, propertyId])
+}
+
+// ──────────────── Call / SMS Logs ────────────────
+
+model CallLog {
+  id                 String       @id @default(cuid())
+  propertyId         String
+  property           Property     @relation(fields: [propertyId], references: [id])
+  callerPhone        String
+  channel            String // "voice" | "sms"
+  direction          String       @default("inbound")
+  twilioSid          String?      @unique
+  duration           Int?
+  transcript         Json?
+  summary            String?
+  estimatedCostCents Int?
+  tokenUsage         Json?
+  recordingUrl       String?
+  reconnectCount     Int          @default(0)
+  application        Application?
+  startedAt          DateTime     @default(now())
+  endedAt            DateTime?
+
+  @@index([propertyId])
+  @@index([callerPhone])
+}
+
+// ──────────────── SMS State ────────────────
+
+model SmsConversation {
+  id            String       @id @default(cuid())
+  callerPhone   String
+  propertyId    String
+  messages      Json         @default("[]")
+  currentField  String?
+  applicationId String?
+  application   Application? @relation(fields: [applicationId], references: [id])
+  expiresAt     DateTime
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([callerPhone, propertyId])
+}
+
+model SmsOptOut {
+  id         String   @id @default(cuid())
+  phone      String
+  propertyId String
+  optedOutAt DateTime @default(now())
+
+  @@unique([phone, propertyId])
+}
+
+// ──────────────── Survey Invites (SMS → web application link) ────────────────
+
+model SurveyInvite {
+  id            String       @id @default(cuid())
+  token         String       @unique
+  propertyId    String
+  property      Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  phone         String // E.164 — the texter who requested the link
+  channel       String       @default("sms") // "sms" | "imessage"
+  expiresAt     DateTime
+  usedAt        DateTime?
+  applicationId String?      @unique
+  application   Application? @relation(fields: [applicationId], references: [id])
+  createdAt     DateTime     @default(now())
+
+  @@index([propertyId, createdAt])
+  @@index([phone, propertyId])
+  @@index([token])
+}
+
+// ──────────────── SMS Relay (temporary Messages.app outbound until 10DLC) ────────────────
+
+model OutboundRelayMessage {
+  id            String    @id @default(cuid())
+  to            String
+  body          String
+  kind          String // 'link' | 'forward' | 'heartbeat' | 'test'
+  status        String // 'pending' | 'deferred' | 'sent' | 'failed'
+  attempts      Int       @default(0)
+  lastError     String?
+  inviteId      String?
+  applicationId String?
+  createdAt     DateTime  @default(now())
+  sentAt        DateTime? // osascript success
+  confirmedAt   DateTime? // chat.db delivery confirmation
+
+  @@index([status, createdAt])
+  @@index([to, kind, status, sentAt])
+}
+
+model ProcessedWebhookEvent {
+  id         String   @id @default(cuid())
+  provider   String // 'telnyx'
+  messageId  String
+  receivedAt DateTime @default(now())
+
+  @@unique([provider, messageId])
+}
+
+// ──────────────── Units ────────────────
+
+model Unit {
+  id                String   @id @default(cuid())
+  propertyId        String
+  property          Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  unitNumber        String
+  bedrooms          Int?
+  bathrooms         Float?
+  sqft              Int?
+  monthlyRent       Int // In cents
+  status            String   @default("vacant") // vacant | occupied | maintenance
+  description       String?
+  petPolicy         String?
+  parkingInfo       String?
+  utilitiesIncluded String?
+  laundry           String?
+  availableDate     DateTime?
+  leases            Lease[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([propertyId, unitNumber])
+}
+
+// ──────────────── Tenant Accounts ────────────────
+
+model Tenant {
+  id                  String    @id @default(cuid())
+  email               String
+  passwordHash        String
+  firstName           String
+  lastName            String
+  phone               String?
+  userId              String // Landlord who owns this tenant record
+  stripeCustomerId    String?
+  plaidAccessToken    String? // Encrypted
+  plaidItemId         String?
+  bankName            String?
+  bankAccountLast4    String?
+  stripePaymentMethodId String?
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  resetToken          String?
+  resetTokenExpiry    DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  leases              Lease[]
+  payments            Payment[]
+  notices             Notice[]
+  messages            Message[] @relation("ReceivedMessages")
+  sentMessages        Message[] @relation("SentByTenant")
+  maintenanceRequests MaintenanceRequest[]
+
+  @@unique([email, userId])
+  @@index([userId])
+}
+
+// ──────────────── Leases ────────────────
+
+model Lease {
+  id                     String       @id @default(cuid())
+  unitId                 String
+  unit                   Unit         @relation(fields: [unitId], references: [id])
+  tenantId               String
+  tenant                 Tenant       @relation(fields: [tenantId], references: [id])
+  monthlyRent            Int // Cents
+  securityDeposit        Int?
+  startDate              DateTime
+  endDate                DateTime?
+  moveOutDate            DateTime?
+  leaseType              String       @default("fixed") // fixed | month_to_month
+  status                 String       @default("active") // active | expired | terminated
+  lateFeeAmount          Int?
+  lateFeeGraceDays       Int          @default(5)
+  rentDueDay             Int          @default(1)
+  documentUrl            String?
+  depositReceivedDate    DateTime?
+  depositReceiptSent     Boolean      @default(false)
+  depositInterestRate    Float?
+  depositHoldingBank     String?
+  depositHoldingAddress  String?
+  depositReturnedDate    DateTime?
+  depositDeductions      Json?
+  payments               Payment[]
+  rentCharges            RentCharge[]
+  notices                Notice[]
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@index([unitId, status])
+}
+
+// ──────────────── Payments ────────────────
+
+model Payment {
+  id               String    @id @default(cuid())
+  leaseId          String
+  lease            Lease     @relation(fields: [leaseId], references: [id])
+  tenantId         String
+  tenant           Tenant    @relation(fields: [tenantId], references: [id])
+  amount           Int // Cents
+  type             String // rent | late_fee | security_deposit | other
+  method           String // ach | card | cash | check
+  status           String    @default("pending") // pending | completed | failed | refunded
+  stripePaymentId  String?
+  description      String?
+  receiptGenerated Boolean   @default(false)
+  receiptUrl       String?
+  forMonth         DateTime?
+  paidAt           DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([leaseId])
+  @@index([tenantId])
+  @@index([forMonth])
+}
+
+// ──────────────── Notices ────────────────
+
+model Notice {
+  id                    String    @id @default(cuid())
+  leaseId               String
+  lease                 Lease     @relation(fields: [leaseId], references: [id])
+  tenantId              String
+  tenant                Tenant    @relation(fields: [tenantId], references: [id])
+  type                  String // five_day | ten_day | thirty_day
+  reason                String // non_payment | lease_violation | termination
+  amountOwed            Int?
+  content               String
+  pdfUrl                String?
+  serviceMethod         String?
+  serviceDate           DateTime?
+  servedBy              String?
+  certifiedMailTracking String?
+  serviceProofUrl       String?
+  serviceConfirmed      Boolean   @default(false)
+  effectiveDate         DateTime?
+  expirationDate        DateTime?
+  visibleInPortal       Boolean   @default(true)
+  smsSentAt             DateTime?
+  smsTo                 String?
+  smsSid                String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([leaseId])
+  @@index([tenantId])
+}
+
+// ──────────────── Messages ────────────────
+
+model Message {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation("ReceivedMessages", fields: [tenantId], references: [id])
+  fromUserId   String?
+  fromUser     User?     @relation("SentByUser", fields: [fromUserId], references: [id])
+  fromTenantId String?
+  fromTenant   Tenant?   @relation("SentByTenant", fields: [fromTenantId], references: [id])
+  replyToId    String?
+  replyTo      Message?  @relation("MessageReplies", fields: [replyToId], references: [id])
+  replies      Message[] @relation("MessageReplies")
+  subject      String
+  body         String
+  isRead       Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  @@index([tenantId, isRead])
+  @@index([replyToId])
+}
+
+// ──────────────── Landlord Website Config ────────────────
+
+model WebsiteConfig {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id])
+  customDomain String?  @unique
+  subdomain    String?  @unique
+  companyName  String
+  logoUrl      String?
+  primaryColor String   @default("#2563eb")
+  heroImageUrl String?
+  aboutText    String?
+  contactEmail String?
+  contactPhone String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ──────────────── Rent Charges ────────────────
+
+model RentCharge {
+  id          String   @id @default(cuid())
+  leaseId     String
+  lease       Lease    @relation(fields: [leaseId], references: [id])
+  amount      Int // Cents
+  type        String // rent | late_fee | other
+  description String?
+  forMonth    DateTime
+  dueDate     DateTime
+  paidAmount  Int      @default(0)
+  status      String   @default("unpaid") // unpaid | partial | paid
+  createdAt   DateTime @default(now())
+
+  @@unique([leaseId, forMonth, type])
+  @@index([leaseId, status])
+}
+
+// ──────────────── Audit Log ────────────────
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  action       String
+  resourceType String
+  resourceId   String
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([resourceType, resourceId])
+}
+
+// ──────────────── Tenant Invites ────────────────
+
+model TenantInvite {
+  id         String    @id @default(cuid())
+  token      String    @unique
+  email      String
+  userId     String
+  propertyId String
+  unitId     String?
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([token])
+  @@index([email])
+}
+
+// ──────────────── Platform Subscriptions & Billing ────────────────
+
+model PricingTier {
+  id                  String         @id @default(cuid())
+  name                String         @unique
+  displayName         String
+  basePriceCents      Int
+  includedAiCents     Int
+  aiMarkupPercent     Float          @default(50)
+  maxProperties       Int?
+  maxPhoneNumbers     Int?
+  websiteEnabled      Boolean        @default(true)
+  customDomainEnabled Boolean        @default(false)
+  description         String?
+  isActive            Boolean        @default(true)
+  sortOrder           Int            @default(0)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  subscriptions       Subscription[]
+}
+
+model Subscription {
+  id                      String       @id @default(cuid())
+  userId                  String       @unique
+  user                    User         @relation(fields: [userId], references: [id])
+  tierId                  String
+  tier                    PricingTier  @relation(fields: [tierId], references: [id])
+  status                  String       @default("trialing") // trialing | active | past_due | canceled | suspended
+  stripeSubscriptionId    String?      @unique
+  stripeCustomerId        String?
+  currentPeriodStart      DateTime
+  currentPeriodEnd        DateTime
+  trialEndsAt             DateTime?
+  canceledAt              DateTime?
+  overrideBasePriceCents  Int?
+  overrideAiMarkupPercent Float?
+  overrideMaxProperties   Int?
+  overrideMaxPhoneNumbers Int?
+  adminNotes              String?
+  invoices                Invoice[]
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
+}
+
+model UsageRecord {
+  id              String   @id @default(cuid())
+  userId          String
+  propertyId      String?
+  type            String // voice_call | sms | web_app | website_visit
+  costCents       Int      @default(0)
+  quantity        Int      @default(1)
+  durationSeconds Int?
+  metadata        Json?
+  billingMonth    DateTime
+  createdAt       DateTime @default(now())
+
+  @@index([userId, billingMonth])
+  @@index([userId, type])
+}
+
+model Invoice {
+  id               String       @id @default(cuid())
+  subscriptionId   String
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id])
+  billingMonth     DateTime
+  basePriceCents   Int
+  aiUsageCostCents Int          @default(0)
+  aiMarkupCents    Int          @default(0)
+  totalCents       Int
+  status           String       @default("draft") // draft | finalized | paid | failed
+  stripeInvoiceId  String?      @unique
+  pdfUrl           String?
+  paidAt           DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@unique([subscriptionId, billingMonth])
+}
+
+// ──────────────── Tour Scheduling ────────────────
+
+model TourSlot {
+  id           String    @id @default(cuid())
+  propertyId   String
+  property     Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  dayOfWeek    Int?      // 0=Sun..6=Sat (recurring weekly)
+  specificDate DateTime? // One-off override date
+  startTime    String    // "09:00" (HH:mm)
+  endTime      String    // "17:00"
+  slotMinutes  Int       @default(30)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([propertyId])
+}
+
+model TourBooking {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  name       String
+  email      String?
+  phone      String?
+  date       DateTime // Exact date+time of the booking
+  status     String   @default("confirmed") // confirmed | canceled | completed | no_show
+  notes      String?
+  source     String   @default("web") // web | voice | sms
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([propertyId, date])
+}
+
+// ──────────────── Maintenance Requests ────────────────
+
+model MaintenanceRequest {
+  id          String    @id @default(cuid())
+  propertyId  String
+  property    Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenantId    String?
+  tenant      Tenant?   @relation(fields: [tenantId], references: [id])
+  unitId      String?
+  title       String
+  description String
+  category    String    @default("general") // plumbing | electrical | appliance | hvac | pest | general | other
+  priority    String    @default("medium") // low | medium | high | urgent
+  status      String    @default("open") // open | in_progress | completed | closed
+  imageUrls   String[]
+  notes       String?   // Landlord notes
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([propertyId, status])
+  @@index([tenantId])
+}
+
+// ──────────────── System Configuration (encrypted key-value) ────────────────
+
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([key])
+}

@@ -1,0 +1,25 @@
+{
+  "name": "tenant-ai",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "db:generate": "npm run prisma:generate --workspace=apps/server",
+    "db:migrate": "npm run prisma:migrate --workspace=apps/server",
+    "db:seed": "npm run prisma:seed --workspace=apps/server",
+    "db:studio": "npm run prisma:studio --workspace=apps/server"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "npm@11.6.4"
+}
