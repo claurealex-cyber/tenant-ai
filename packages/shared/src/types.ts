@@ -154,6 +154,12 @@ export interface PromptBuilderInput {
   channel: ApplicationChannel;
   isTenant?: boolean;
   hasTourSlots?: boolean;
+  /** Voice only: the AI may text the application link (caller_link != off). */
+  callerLink?: boolean;
+  /** Voice only: "link" = do not collect the application by voice, text the link. */
+  voiceIntake?: "phone" | "link";
+  /** Voice + link intake: the exact opening line the AI greets with. */
+  voiceGreeting?: string | null;
 }
 
 // ──────────────── Validation Result ────────────────

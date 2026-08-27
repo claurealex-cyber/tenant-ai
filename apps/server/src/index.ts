@@ -21,6 +21,7 @@ import { lateFeeJob } from "./jobs/late-fee.js";
 import { depositRemindersJob } from "./jobs/deposit-reminders.js";
 import { leaseExpirationJob } from "./jobs/lease-expiration.js";
 import { smsCleanupJob } from "./jobs/sms-cleanup.js";
+import { zillowDailyJob } from "./jobs/zillow-daily.js";
 import { registerShutdownHandlers } from "./lib/graceful-shutdown.js";
 import { registerTwilioValidation } from "./lib/twilio-validate.js";
 
@@ -84,7 +85,7 @@ startRelaySweep((msg) => server.log.info(msg));
 // Background jobs — registered AFTER listen so a hung Redis connection can
 // never block the webhook endpoint from coming up. Each registration races a
 // 10s timeout: Redis absence degrades (logged, skipped) instead of hanging.
-const jobs = [billingCycleJob, rentPostingJob, lateFeeJob, depositRemindersJob, leaseExpirationJob, smsCleanupJob];
+const jobs = [billingCycleJob, rentPostingJob, lateFeeJob, depositRemindersJob, leaseExpirationJob, smsCleanupJob, zillowDailyJob];
 for (const job of jobs) {
   try {
     await Promise.race([

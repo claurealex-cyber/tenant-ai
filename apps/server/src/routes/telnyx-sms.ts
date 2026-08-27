@@ -120,7 +120,7 @@ export async function processTelnyxInbound(
         await relaySendWithGuards(
           from,
           rewriteForRelay(reply, property?.name ?? "Property", to),
-          { kind: result.replyKind === "confirmation" ? "confirmation" : "link" },
+          { kind: result.replyKind === "confirmation" ? "confirmation" : result.replyKind === "ai" ? "ai" : "link" },
         );
       } else {
         await sendTelnyxSms(to, from, reply);

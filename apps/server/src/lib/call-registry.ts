@@ -17,6 +17,8 @@ export interface ActiveCall {
   transcript: TranscriptEntry[];
   startTime: Date;
   reconnectCount: number;
+  /** Set once the application link has been texted to this caller (idempotency). */
+  linkSentAt?: Date | null;
 }
 
 const activeCalls = new Map<string, ActiveCall>();

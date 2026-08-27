@@ -478,3 +478,17 @@ describe("owner view routes", () => {
     await server.close();
   });
 });
+
+describe("ai kind budget isolation + cooldown exemption", () => {
+  it("an ai reply is not cooldown-skipped after a link, and is stored as kind ai", async () => {
+    const P = `+1312${(Date.now() + 7).toString().slice(-7)}`;
+    const link = await relaySendWithGuards(P, "here is your link", { kind: "link" });
+    expect(link.status).toBe("sent"); // sets the per-phone link cooldown
+    // A link 1 min later WOULD be cooldown-skipped; an ai reply must NOT be.
+    const ai = await relaySendWithGuards(P, "the 2br is $1,500/mo", { kind: "ai" });
+    expect(ai.status).toBe("sent");
+    const row = await prisma.outboundRelayMessage.findUnique({ where: { id: ai.id! } });
+    expect(row?.kind).toBe("ai"); // stored as ai (own budget), not remapped to link
+    await prisma.outboundRelayMessage.deleteMany({ where: { to: P } });
+  });
+});

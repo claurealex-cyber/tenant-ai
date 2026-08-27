@@ -14,6 +14,8 @@ export * from "./csv.js";
 export * from "./tour-utils.js";
 export * from "./sms.js";
 export * from "./survey-token.js";
+export * from "./survey-mode.js";
+export * from "./intake-style.js";
 // notice-card.js is NOT re-exported here because @resvg/resvg-js is a native
 // module that cannot be bundled by webpack/Next.js transpilePackages.
 // Import directly: import { ... } from "@tenant-ai/shared/dist/notice-card.js"

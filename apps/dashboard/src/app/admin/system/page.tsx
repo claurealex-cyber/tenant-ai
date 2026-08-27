@@ -14,7 +14,15 @@ interface PhoneSystemStatus {
   configured: boolean;
   publicUrl: string | null;
   serverPort: number;
-  tunnel: { running: boolean; forwardsTo: string | null; correct: boolean };
+  proxyPort: number;
+  proxyUp: boolean;
+  tunnel: {
+    running: boolean;
+    forwardsTo: string | null;
+    correct: boolean;
+    target: "proxy" | "server" | "other" | null;
+  };
+  webPublic: boolean;
   publicHealthOk: boolean;
   numbers: Array<{
     propertyId: string;
@@ -65,12 +73,22 @@ function formatMB(bytes: number): string {
   });
 }
 
+// Every request through ngrok is metered (Free plan: 20k/month shared with the
+// phone webhooks). Poll slowly, never while the tab is hidden, and stop after
+// repeated failures — a forgotten background tab must cost zero requests.
+// Rule for this dashboard: no poller without a visibility gate.
+const HEALTH_POLL_SECONDS = 120;
+const HEALTH_MAX_FAILURES = 3;
+
 export default function AdminSystemPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
-  const [countdown, setCountdown] = useState(30);
+  const [countdown, setCountdown] = useState(HEALTH_POLL_SECONDS);
+  const [pollPaused, setPollPaused] = useState<"" | "hidden" | "failures">("");
+  const [webToggling, setWebToggling] = useState(false);
+  const [webSteps, setWebSteps] = useState<PhoneSystemStep[] | null>(null);
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
   const [phoneStatus, setPhoneStatus] = useState<PhoneSystemStatus | null>(null);
   const [phoneLoading, setPhoneLoading] = useState(true);
@@ -80,7 +98,7 @@ export default function AdminSystemPage() {
 
   const [healthTarget, setHealthTarget] = useState("");
 
-  const fetchHealth = useCallback(async () => {
+  const fetchHealth = useCallback(async (): Promise<boolean> => {
     try {
       const res = await fetch("/api/admin/server-health", {
         cache: "no-store",
@@ -88,25 +106,51 @@ export default function AdminSystemPage() {
       if (!res.ok) {
         setError("Server returned an error response.");
         setHealth(null);
-        return;
+        return false;
       }
       const data = await res.json();
       if (data.target) setHealthTarget(data.target);
       if (!data.ok) {
         setError("Unable to reach the server. It may be down or unreachable.");
         setHealth(null);
-        return;
+        return false;
       }
       setHealth(data.health);
       setError("");
       setLastRefresh(new Date());
+      return true;
     } catch {
       setError("Unable to reach the server. It may be down or unreachable.");
       setHealth(null);
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const setWebAccess = async (on: boolean) => {
+    setWebToggling(true);
+    setWebSteps(null);
+    setPhoneError("");
+    try {
+      const res = await fetch("/api/admin/phone-system", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: on ? "web-on" : "web-off" }),
+      });
+      if (!res.ok) {
+        setPhoneError("Failed to change web access.");
+        return;
+      }
+      const data = await res.json();
+      setWebSteps(data.steps);
+      await fetchPhoneStatus();
+    } catch {
+      setPhoneError("Failed to change web access.");
+    } finally {
+      setWebToggling(false);
+    }
+  };
 
   const fetchPhoneStatus = useCallback(async () => {
     try {
@@ -152,20 +196,55 @@ export default function AdminSystemPage() {
   }, [fetchPhoneStatus]);
 
   useEffect(() => {
-    fetchHealth();
+    let failures = 0;
+    let stopped = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
 
-    const interval = setInterval(() => {
-      fetchHealth();
-      setCountdown(30);
-    }, 30000);
+    const poll = async () => {
+      if (stopped) return;
+      const ok = await fetchHealth();
+      failures = ok ? 0 : failures + 1;
+      setCountdown(HEALTH_POLL_SECONDS);
+      if (failures >= HEALTH_MAX_FAILURES) {
+        stop("failures");
+      }
+    };
+    const start = () => {
+      if (interval || stopped) return;
+      setPollPaused("");
+      interval = setInterval(poll, HEALTH_POLL_SECONDS * 1000);
+    };
+    const stop = (why: "hidden" | "failures") => {
+      if (interval) clearInterval(interval);
+      interval = null;
+      if (why === "failures") stopped = true;
+      setPollPaused(why);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        if (!stopped) {
+          poll(); // one refresh on return, then resume the slow cadence
+          start();
+        }
+      } else {
+        stop("hidden");
+      }
+    };
+
+    poll();
+    if (document.visibilityState === "visible") start();
+    else setPollPaused("hidden");
+    document.addEventListener("visibilitychange", onVisibility);
 
     const tick = setInterval(() => {
       setCountdown((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
 
     return () => {
-      clearInterval(interval);
+      stopped = true;
+      if (interval) clearInterval(interval);
       clearInterval(tick);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [fetchHealth]);
 
@@ -177,7 +256,7 @@ export default function AdminSystemPage() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">System Health</h1>
             <p className="mt-1 text-sm text-gray-500">
-              Server status and resource monitoring. Auto-refreshes every 30 seconds.
+              Server status and resource monitoring. Auto-refreshes every {HEALTH_POLL_SECONDS / 60} minutes while this tab is visible.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -187,7 +266,11 @@ export default function AdminSystemPage() {
               </span>
             )}
             <span className="text-xs text-gray-400">
-              Next refresh in {countdown}s
+              {pollPaused === "hidden"
+                ? "Auto-refresh paused (tab hidden)"
+                : pollPaused === "failures"
+                  ? "Auto-refresh stopped after repeated failures — reload to resume"
+                  : `Next refresh in ${countdown}s`}
             </span>
             <button
               onClick={() => {
@@ -243,22 +326,73 @@ export default function AdminSystemPage() {
             <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div>
                 <p className="text-sm font-medium text-gray-500">Tunnel</p>
-                <p className="mt-1 text-sm text-gray-900">
+                <p className="mt-1 text-sm text-gray-900" data-testid="tunnel-target">
                   {phoneStatus.tunnel.running ? (
-                    phoneStatus.tunnel.correct ? (
+                    phoneStatus.tunnel.target === "proxy" ? (
                       <span className="text-green-700">
-                        Running → {phoneStatus.tunnel.forwardsTo}
+                        Running → proxy :{phoneStatus.proxyPort} (web access ON)
+                      </span>
+                    ) : phoneStatus.tunnel.target === "server" ? (
+                      <span className="text-green-700">
+                        Running → server :{phoneStatus.serverPort} (web access OFF
+                        {phoneStatus.proxyUp ? "" : " — no proxy"})
                       </span>
                     ) : (
                       <span className="text-yellow-700">
                         Running but forwards to {phoneStatus.tunnel.forwardsTo} (expected
-                        port {phoneStatus.serverPort})
+                        port {phoneStatus.proxyPort} or {phoneStatus.serverPort})
                       </span>
                     )
                   ) : (
                     <span className="text-gray-500">Not running</span>
                   )}
                 </p>
+                <div className="mt-2 flex items-center gap-2">
+                  <span
+                    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                      phoneStatus.webPublic
+                        ? "bg-green-100 text-green-700"
+                        : "bg-gray-100 text-gray-600"
+                    }`}
+                  >
+                    Dashboard {phoneStatus.webPublic ? "public" : "local-only"}
+                  </span>
+                  {phoneStatus.tunnel.running && (
+                    <button
+                      onClick={() => {
+                        if (
+                          phoneStatus.webPublic &&
+                          !window.confirm(
+                            "Turn web access OFF?\n\nThe public URL will go straight to the API server: calls, texts and the hosted survey keep working, but THIS dashboard becomes unreachable from outside the Mac — including from this browser if you are remote.\n\nTo turn it back on: on the Mac run  ./start.sh web-on  (or relaunch Tenant AI from the Dock, which always restores it)."
+                          )
+                        ) {
+                          return;
+                        }
+                        setWebAccess(!phoneStatus.webPublic);
+                      }}
+                      disabled={webToggling || (!phoneStatus.webPublic && !phoneStatus.proxyUp)}
+                      title={
+                        !phoneStatus.webPublic && !phoneStatus.proxyUp
+                          ? "Caddy proxy is not running — relaunch Tenant AI to start it"
+                          : phoneStatus.webPublic
+                            ? "Point the domain at the server only (quota kill-switch)"
+                            : "Point the domain at the proxy (dashboard reachable from anywhere)"
+                      }
+                      className="rounded border border-gray-300 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {webToggling ? "…" : phoneStatus.webPublic ? "Turn web access off" : "Turn web access on"}
+                    </button>
+                  )}
+                </div>
+                {webSteps && (
+                  <ul className="mt-2 space-y-1">
+                    {webSteps.map((step) => (
+                      <li key={step.name} className={`text-xs ${step.ok ? "text-green-700" : "text-red-600"}`}>
+                        {step.ok ? "✓" : "✗"} {step.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
               <div>
                 <p className="text-sm font-medium text-gray-500">Public URL</p>

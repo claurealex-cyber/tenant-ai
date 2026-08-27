@@ -161,6 +161,7 @@ describe("GET /api/admin/phone-system", () => {
       running: true,
       forwardsTo: "http://localhost:3001",
       correct: true,
+      target: "server", // SERVER_PORT=3001 in this file → server-direct = healthy
     });
     expect(status.publicHealthOk).toBe(true);
     expect(status.numbers).toHaveLength(1);
@@ -358,4 +359,180 @@ describe("POST /api/admin/phone-system", () => {
     expect(healthStep.ok).toBe(false);
     expect(mockNumberUpdate).not.toHaveBeenCalled();
   }, 20000);
+});
+
+// ── Tunnel target model (proxy vs server vs other) + web access switch ──
+
+describe("tunnel target model", () => {
+  const PROXY_TUNNEL = { ...RUNNING_TUNNEL, config: { addr: "http://localhost:3010" } };
+  const WRONG_TUNNEL = { ...RUNNING_TUNNEL, config: { addr: "http://localhost:9999" } };
+
+  /** Like mockFetchRoutes, plus the local Caddy /health probe. */
+  function mockRoutesWithProxy({ tunnels, proxyUp }: { tunnels: unknown[] | null; proxyUp: boolean }) {
+    mockFetch.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === "http://127.0.0.1:3010/health") {
+        if (!proxyUp) throw new Error("ECONNREFUSED");
+        return { ok: true, json: async () => ({ status: "ok" }) };
+      }
+      if (url.startsWith(`${NGROK_API}/api/tunnels`)) {
+        if (tunnels === null) throw new Error("ECONNREFUSED");
+        if (init?.method === "DELETE" || init?.method === "POST") return { ok: true, json: async () => ({}) };
+        return { ok: true, json: async () => ({ tunnels }) };
+      }
+      if (url === `${PUBLIC_URL}/health`) return { ok: true, json: async () => ({ status: "ok" }) };
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it("classifyTunnelTarget: proxy / server / other by port", async () => {
+    const { classifyTunnelTarget } = await import("../lib/phone-system");
+    const ports = { server: 3005, proxy: 3010 };
+    expect(classifyTunnelTarget("http://localhost:3010", ports)).toBe("proxy");
+    expect(classifyTunnelTarget("http://localhost:3005", ports)).toBe("server");
+    expect(classifyTunnelTarget("http://localhost:3005/", ports)).toBe("server");
+    expect(classifyTunnelTarget("http://localhost:3001", ports)).toBe("other");
+    expect(classifyTunnelTarget("localhost", ports)).toBe("other");
+  });
+
+  it("a tunnel pointed at the PROXY is healthy (web public) — not 'wrong'", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [PROXY_TUNNEL], proxyUp: true });
+    mockNumberFetch.mockResolvedValue({ voiceUrl: `${PUBLIC_URL}/voice/incoming`, smsUrl: `${PUBLIC_URL}/sms/incoming` });
+
+    const { GET } = await import("../app/api/admin/phone-system/route");
+    const { status } = await (await GET(makeRequest("GET"))).json();
+    expect(status.tunnel).toMatchObject({ running: true, correct: true, target: "proxy" });
+    expect(status.webPublic).toBe(true);
+    expect(status.proxyUp).toBe(true);
+    expect(status.ready).toBe(true);
+  });
+
+  it("a tunnel pointed at the SERVER is healthy too (web off) — the kill-switch is not an error", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [RUNNING_TUNNEL], proxyUp: true }); // addr :3001 = SERVER_PORT in this file
+    mockNumberFetch.mockResolvedValue({ voiceUrl: `${PUBLIC_URL}/voice/incoming`, smsUrl: `${PUBLIC_URL}/sms/incoming` });
+
+    const { GET } = await import("../app/api/admin/phone-system/route");
+    const { status } = await (await GET(makeRequest("GET"))).json();
+    expect(status.tunnel).toMatchObject({ correct: true, target: "server" });
+    expect(status.webPublic).toBe(false);
+    expect(status.ready).toBe(true);
+  });
+
+  it("a tunnel pointed anywhere else is wrong", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [WRONG_TUNNEL], proxyUp: false });
+    mockNumberFetch.mockResolvedValue({ voiceUrl: `${PUBLIC_URL}/voice/incoming`, smsUrl: `${PUBLIC_URL}/sms/incoming` });
+
+    const { GET } = await import("../app/api/admin/phone-system/route");
+    const { status } = await (await GET(makeRequest("GET"))).json();
+    expect(status.tunnel).toMatchObject({ correct: false, target: "other" });
+    expect(status.ready).toBe(false);
+  });
+
+  it("Start never downgrades a proxy tunnel while Caddy is up", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [PROXY_TUNNEL], proxyUp: true });
+    mockNumberUpdate.mockResolvedValue({});
+
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    const result = await (await POST(makeRequest("POST"))).json();
+    expect(result.ready).toBe(true);
+    const deletes = mockFetch.mock.calls.filter((c) => c[1]?.method === "DELETE");
+    expect(deletes).toHaveLength(0); // reused as-is
+    const tunnelStep = result.steps.find((s: { name: string }) => s.name === "ngrok tunnel");
+    expect(tunnelStep.detail).toContain("proxy");
+  });
+
+  it("Start targets the proxy when Caddy is up and the agent must be spawned", async () => {
+    mockAdminSession();
+    mockConfig();
+    let spawned = false;
+    mockSpawn.mockImplementation(() => { spawned = true; return { unref: () => undefined }; });
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "http://127.0.0.1:3010/health") return { ok: true, json: async () => ({}) };
+      if (url.startsWith(`${NGROK_API}/api/tunnels`)) {
+        if (!spawned) throw new Error("ECONNREFUSED");
+        return { ok: true, json: async () => ({ tunnels: [PROXY_TUNNEL] }) };
+      }
+      if (url === `${PUBLIC_URL}/health`) return { ok: true, json: async () => ({}) };
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    mockNumberUpdate.mockResolvedValue({});
+
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    await POST(makeRequest("POST"));
+    expect(mockSpawn).toHaveBeenCalledWith("ngrok", expect.arrayContaining(["3010"]), expect.anything());
+  }, 20000);
+
+  it("Start falls back to the server when Caddy is down (phones never wait on the proxy)", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [RUNNING_TUNNEL], proxyUp: false });
+    mockNumberUpdate.mockResolvedValue({});
+
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    const result = await (await POST(makeRequest("POST"))).json();
+    expect(result.ready).toBe(true);
+    const tunnelStep = result.steps.find((s: { name: string }) => s.name === "ngrok tunnel");
+    expect(tunnelStep.detail).toContain("server direct");
+  });
+
+  function postAction(action: string) {
+    return new NextRequest("http://localhost:3000/api/admin/phone-system", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+  }
+
+  it("web-off retargets the domain to the server via the agent API", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [PROXY_TUNNEL], proxyUp: true });
+
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    const result = await (await POST(postAction("web-off"))).json();
+    expect(result.ok).toBe(true);
+    const post = mockFetch.mock.calls.find((c) => c[1]?.method === "POST" && String(c[0]).endsWith("/api/tunnels"));
+    expect(JSON.parse(post![1].body)).toMatchObject({ addr: "3001", domain: "example.ngrok-free.dev" });
+    expect(mockNumberUpdate).not.toHaveBeenCalled(); // no webhook churn
+  });
+
+  it("web-on retargets to the proxy, but refuses when Caddy is not running", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [RUNNING_TUNNEL], proxyUp: false });
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    const refused = await (await POST(postAction("web-on"))).json();
+    expect(refused.ok).toBe(false);
+    expect(refused.steps[0].detail).toContain("Caddy proxy is not answering");
+
+    mockRoutesWithProxy({ tunnels: [RUNNING_TUNNEL], proxyUp: true });
+    const result = await (await POST(postAction("web-on"))).json();
+    expect(result.ok).toBe(true);
+    const post = mockFetch.mock.calls.find((c) => c[1]?.method === "POST" && String(c[0]).endsWith("/api/tunnels"));
+    expect(JSON.parse(post![1].body)).toMatchObject({ addr: "3010" });
+  });
+
+  it("web-on/off is a no-op when the tunnel already points at the target", async () => {
+    mockAdminSession();
+    mockConfig();
+    mockRoutesWithProxy({ tunnels: [PROXY_TUNNEL], proxyUp: true });
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    const result = await (await POST(postAction("web-on"))).json();
+    expect(result.ok).toBe(true);
+    expect(mockFetch.mock.calls.filter((c) => c[1]?.method === "DELETE")).toHaveLength(0);
+  });
+
+  it("rejects unknown actions", async () => {
+    mockAdminSession();
+    const { POST } = await import("../app/api/admin/phone-system/route");
+    const res = await POST(postAction("explode"));
+    expect(res.status).toBe(400);
+  });
 });

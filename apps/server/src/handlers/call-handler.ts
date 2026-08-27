@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { resolveConfig } from "@tenant-ai/shared";
+import { resolveConfig, normalizeCallerLink } from "@tenant-ai/shared";
 import { prisma } from "../lib/prisma.js";
 import {
   addCall,
@@ -35,6 +35,7 @@ import {
   getMaintenanceRequestsForTenant,
 } from "../services/maintenance-service.js";
 import { forwardSurveySummary } from "../services/survey-forward.js";
+import { textLinkToCaller } from "../services/caller-link.js";
 
 const MAX_CONCURRENT = parseInt(
   process.env.MAX_CONCURRENT_CALLS || "10",
@@ -125,6 +126,18 @@ async function dispatchFunctionCall(
         console.error("Voice application forward failed:", err);
       });
       return JSON.stringify(completeResult);
+    }
+
+    case "text_application_link": {
+      const prop = await prisma.property.findUnique({
+        where: { id: propertyId },
+        select: { id: true, userId: true, name: true, twilioPhone: true },
+      });
+      if (!prop) return JSON.stringify({ error: "property not found" });
+      if (call.linkSentAt) return JSON.stringify({ status: "already_sent" });
+      const res = await textLinkToCaller({ property: prop, callerPhone, source: "voice_tool" });
+      if (res.status === "sent" || res.status === "already_sent") call.linkSentAt = new Date();
+      return JSON.stringify(res);
     }
 
     case "get_property_info": {
@@ -273,7 +286,13 @@ export async function handleMediaStream(
     isStandard: q.isStandard,
   }));
 
+  const callerLinkMode = normalizeCallerLink(await resolveConfig("sms_relay", "caller_link"));
+  const voiceIntakeMode = ((await resolveConfig("sms_relay", "voice_intake")) === "link" ? "link" : "phone") as "phone" | "link";
+  const voiceGreeting = await resolveConfig("sms_relay", "voice_greeting");
   const instructions = buildPrompt({
+    callerLink: callerLinkMode !== "off",
+    voiceIntake: voiceIntakeMode,
+    voiceGreeting,
     property: {
       name: property.name,
       address: property.address,
@@ -291,7 +310,7 @@ export async function handleMediaStream(
     hasTourSlots,
   });
 
-  const tools = buildTools({ isTenant, hasTourSlots });
+  const tools = buildTools({ isTenant, hasTourSlots, callerLink: callerLinkMode !== "off" });
 
   // Create call log
   const callLog = await prisma.callLog.create({
@@ -410,6 +429,28 @@ export async function handleMediaStream(
           };
 
           addCall(streamSid, callEntry);
+
+          // VC1: every_call → text the application link at call START so the
+          // greeting can truthfully say "we are texting you a link". Fire-and-
+          // forget: a relay hiccup must never delay call setup. linkSentAt is
+          // set on success so the end-of-call every_call path won't re-send.
+          void (async () => {
+            try {
+              const callerLinkMode = normalizeCallerLink(await resolveConfig("sms_relay", "caller_link"));
+              if (callerLinkMode === "every_call") {
+                const res = await textLinkToCaller({
+                  property: { id: property.id, userId: property.userId, name: property.name, twilioPhone: property.twilioPhone },
+                  callerPhone,
+                  source: "call_start",
+                });
+                const live = getCall(streamSid);
+                if (live && (res.status === "sent" || res.status === "already_sent")) live.linkSentAt = new Date();
+                if (res.status === "cannot_text") console.info(`[call-start link] not sent to ${callerPhone}: ${res.reason}`);
+              }
+            } catch (err) {
+              console.error("call-start link send failed:", err);
+            }
+          })();
 
           // Start call duration monitoring
           const monitor = setInterval(() => {
@@ -558,6 +599,32 @@ async function handleCallEnd(
     });
   }
 
+  // every_call: text the link to a caller who did not finish an application and
+  // wasn't already texted during the call. Fire-and-forget AFTER teardown work
+  // so a relay hiccup never delays the call ending. Skip very short calls.
+  try {
+    const callerLinkMode = normalizeCallerLink(await resolveConfig("sms_relay", "caller_link"));
+    const longEnough = duration >= 5;
+    const completed = !!call.applicationId;
+    if (callerLinkMode === "every_call" && longEnough && !completed && !call.linkSentAt) {
+      const prop = await prisma.property.findUnique({
+        where: { id: call.propertyId },
+        select: { id: true, userId: true, name: true, twilioPhone: true },
+      });
+      if (prop) {
+        const res = await textLinkToCaller({ property: prop, callerPhone: call.callerPhone, source: "call_end" });
+        const note = res.status === "cannot_text" ? `[link not sent: ${res.reason}]` : "[link texted]";
+        // transcript is Json (not a scalar list) → read-modify-write to append.
+        const cur = await prisma.callLog.findUnique({ where: { id: callLogId }, select: { transcript: true } });
+        const arr = Array.isArray(cur?.transcript) ? (cur!.transcript as unknown[]) : [];
+        arr.push({ role: "system", content: note, timestamp: new Date().toISOString() });
+        await prisma.callLog.update({ where: { id: callLogId }, data: { transcript: arr as any } }).catch(() => undefined);
+      }
+    }
+  } catch (err) {
+    console.error("call-end link send failed:", err);
+  }
+
   removeCall(streamSid);
 }
 
@@ -624,7 +691,8 @@ async function reconnectOpenAI(
     hasTourSlots: call.hasTourSlots,
   });
 
-  const tools = buildTools({ isTenant: call.isTenant, hasTourSlots: call.hasTourSlots });
+  const reconnectCallerLink = normalizeCallerLink(await resolveConfig("sms_relay", "caller_link"));
+  const tools = buildTools({ isTenant: call.isTenant, hasTourSlots: call.hasTourSlots, callerLink: reconnectCallerLink !== "off" });
 
   const reconnectApiKey = await resolveConfig("openai", "api_key") || undefined;
 

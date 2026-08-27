@@ -15,7 +15,7 @@ import {
  * tenant-facing is fire-and-forget without a persistent record to retry from.
  */
 
-export type RelayKind = "link" | "forward" | "heartbeat" | "test" | "confirmation";
+export type RelayKind = "link" | "forward" | "heartbeat" | "test" | "confirmation" | "ai";
 
 export interface RelayMeta {
   kind: RelayKind;
@@ -92,7 +92,7 @@ export async function relaySendWithGuards(
       data: {
         to,
         body: text,
-        kind: meta.kind === "confirmation" ? "link" : meta.kind,
+        kind: meta.kind === "confirmation" ? "link" : meta.kind, // "ai" stored as-is for its own budget
         status: "pending",
         inviteId: meta.inviteId ?? null,
         applicationId: meta.applicationId ?? null,
@@ -140,15 +140,30 @@ export async function relaySendWithGuards(
 
 /** Cap check. Returns a reason string when the send must be deferred. */
 async function checkCaps(to: string, kind: RelayKind): Promise<string | null> {
-  const hourlyCap = await cfgInt("hourly_cap", 5);
-  const dailyCap = await cfgInt("daily_cap", 25);
-  const newRecipientCap = 10;
   const hourAgo = new Date(Date.now() - 3600_000);
   const dayAgo = new Date(Date.now() - 86_400_000);
 
+  // AI Q&A replies have their OWN global budget, counted over kind="ai" rows
+  // only — they never draw down the link/forward budget and vice versa.
+  if (kind === "ai") {
+    const qaHourly = await cfgInt("qa_hourly_cap", 10);
+    const qaDaily = await cfgInt("qa_daily_cap", 40);
+    const [aiHour, aiDay] = await Promise.all([
+      prisma.outboundRelayMessage.count({ where: { status: "sent", kind: "ai", sentAt: { gt: hourAgo } } }),
+      prisma.outboundRelayMessage.count({ where: { status: "sent", kind: "ai", sentAt: { gt: dayAgo } } }),
+    ]);
+    if (aiHour >= qaHourly) return "qa hourly cap";
+    if (aiDay >= qaDaily) return "qa daily cap";
+    return null;
+  }
+
+  const hourlyCap = await cfgInt("hourly_cap", 5);
+  const dailyCap = await cfgInt("daily_cap", 25);
+  const newRecipientCap = 10;
+
   const [sentLastHour, sentLastDay] = await Promise.all([
-    prisma.outboundRelayMessage.count({ where: { status: "sent", sentAt: { gt: hourAgo } } }),
-    prisma.outboundRelayMessage.count({ where: { status: "sent", sentAt: { gt: dayAgo } } }),
+    prisma.outboundRelayMessage.count({ where: { status: "sent", kind: { not: "ai" }, sentAt: { gt: hourAgo } } }),
+    prisma.outboundRelayMessage.count({ where: { status: "sent", kind: { not: "ai" }, sentAt: { gt: dayAgo } } }),
   ]);
 
   // Reserve 2 slots/hour for forwards so links can't starve summaries.
@@ -224,6 +239,7 @@ export async function sweepOnce(log: (msg: string) => void = () => {}): Promise<
   if (relayEnabled) {
     const candidates = await prisma.outboundRelayMessage.findMany({
       where: {
+        kind: { not: "ai" }, // never retry an AI answer — stale is worse than none
         OR: [
           { status: "deferred" },
           { status: "failed", lastError: { not: "cooldown" }, attempts: { lt: MAX_ATTEMPTS } },

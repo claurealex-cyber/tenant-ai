@@ -9,7 +9,7 @@ import { DEFAULT_AI_DISCLOSURE, SMS_TARGET_CHARS } from "./constants.js";
  * Supports multi-intent calls: Q&A, tour scheduling, applications, and maintenance.
  */
 export function buildPrompt(input: PromptBuilderInput): string {
-  const { property, questions, application, channel, isTenant, hasTourSlots } = input;
+  const { property, questions, application, channel, isTenant, hasTourSlots, callerLink, voiceIntake, voiceGreeting } = input;
 
   let disclosure =
     property.aiDisclosureText || DEFAULT_AI_DISCLOSURE;
@@ -43,7 +43,18 @@ export function buildPrompt(input: PromptBuilderInput): string {
   // ── Conversation flow — route by caller identity ──
   sections.push("");
   sections.push("CONVERSATION FLOW:");
-  if (property.greetingMessage) {
+  // A link-only voice intake can override the greeting with an exact script the
+  // AI must say verbatim; otherwise the property's own greetingMessage is used
+  // with its original (softer) wording, unchanged.
+  const strictScript =
+    channel === "voice" && voiceIntake === "link" && voiceGreeting?.trim()
+      ? voiceGreeting.trim()
+      : null;
+  if (strictScript) {
+    sections.push(
+      "1. Open the call by saying EXACTLY this, word for word: \"" + strictScript + "\"",
+    );
+  } else if (property.greetingMessage) {
     sections.push(
       "1. Greet the caller with this message: \"" + property.greetingMessage + "\"",
     );
@@ -291,6 +302,17 @@ export function buildPrompt(input: PromptBuilderInput): string {
     sections.push("- Do not use markdown formatting.");
   }
 
+  if (channel === "voice" && callerLink) {
+    sections.push(
+      "- If the caller asks for a link, prefers to apply online, or the application would take more than a couple of minutes, offer to text them the application link and call text_application_link (it sends the correct link automatically). Confirm out loud once it's sent.",
+    );
+    if (voiceIntake === "link") {
+      sections.push(
+        "- IMPORTANT: Do NOT collect application details (name, SSN, DOB, income, employer) by voice. Answer their questions, offer a tour, and text them the application link with text_application_link so they can apply online. Never ask start_application.",
+      );
+    }
+  }
+
   if (channel === "voice") {
     sections.push(
       "- Always spell out every answer letter by letter when confirming with the caller. This is critical for accuracy over voice.",
@@ -318,7 +340,7 @@ interface ToolDefinition {
  * Build the OpenAI function tools array for voice and SMS sessions.
  * Conditionally includes tour and maintenance tools based on property/caller context.
  */
-export function buildTools(options?: { isTenant?: boolean; hasTourSlots?: boolean }): ToolDefinition[] {
+export function buildTools(options?: { isTenant?: boolean; hasTourSlots?: boolean; callerLink?: boolean }): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     {
       type: "function",
@@ -477,5 +499,49 @@ export function buildTools(options?: { isTenant?: boolean; hasTourSlots?: boolea
     });
   }
 
+    if (options?.callerLink) {
+    tools.push({
+      type: "function",
+      name: "text_application_link",
+      description:
+        "Text the rental application link to the caller's phone. Call this when the caller asks for a link, prefers to apply online, or the application would take a while by voice. The system sends the correct link automatically.",
+      parameters: { type: "object", properties: {}, required: [] },
+    });
+  }
   return tools;
 }
+
+/**
+ * Build a focused SMS Q&A system prompt for the Link + Q&A intake style. This
+ * is deliberately SEPARATE from buildPrompt() (which drives the application
+ * flow): here the AI only answers questions about the property from the facts
+ * block and NEVER collects an application by text.
+ */
+export function buildQaPrompt(input: {
+  propertyName: string;
+  facts: string;
+  hasAnyFacts: boolean;
+  applyUrl: string;
+  disclosure?: string | null;
+}): string {
+  const lines: string[] = [];
+  lines.push(`You are a friendly leasing assistant for ${input.propertyName}, answering a prospective renter over SMS.`);
+  lines.push(input.disclosure?.trim() || DEFAULT_AI_DISCLOSURE);
+  lines.push("");
+  lines.push("PROPERTY FACTS (the ONLY source you may use for specifics):");
+  lines.push(input.facts || "(no property details are on file)");
+  lines.push("");
+  lines.push("RULES:");
+  lines.push(`- Keep every reply under ${SMS_TARGET_CHARS} characters, plain text, no markdown. One short, friendly message.`);
+  lines.push("- Answer ONLY from the PROPERTY FACTS above. If a detail (price, availability, etc.) is not there, say you don't have it in front of you and that the team will follow up — do NOT guess or invent numbers.");
+  lines.push("- You are NOT taking an application by text. Never ask for or accept SSN, date of birth, income, employer, or other application details. If they try to apply or give that info, tell them to use the application link.");
+  lines.push(`- The application link is: ${input.applyUrl} — share it when they want to apply or ask how.`);
+  lines.push("- If they want a tour, invite them to reply with a day and time and say the team will confirm.");
+  lines.push("- Do not give legal, financial, medical, or fair-housing eligibility advice; politely defer to the team.");
+  lines.push("- Always answer in English.");
+  if (!input.hasAnyFacts) {
+    lines.push("- NOTE: no property details are on file, so for any specific question say you'll have the team follow up with details.");
+  }
+  return lines.join("\n");
+}
+

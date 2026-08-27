@@ -66,7 +66,9 @@ export async function callChatAPI(
         model,
         messages: chatMessages,
         tools: chatTools.length > 0 ? chatTools : undefined,
-        tool_choice: "auto",
+        // tool_choice is only valid WITH tools — omit it for tool-less calls
+        // (e.g. the Link + Q&A engine), or OpenAI returns 400.
+        ...(chatTools.length > 0 ? { tool_choice: "auto" } : {}),
       }),
       signal: AbortSignal.timeout(25_000),
     },

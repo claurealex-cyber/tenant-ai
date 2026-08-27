@@ -205,12 +205,13 @@ model SmsOptOut {
 // ──────────────── Survey Invites (SMS → web application link) ────────────────
 
 model SurveyInvite {
-  id            String       @id @default(cuid())
-  token         String       @unique
-  propertyId    String
-  property      Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  phone         String // E.164 — the texter who requested the link
-  channel       String       @default("sms") // "sms" | "imessage"
+  id             String       @id @default(cuid())
+  token          String       @unique
+  propertyId     String
+  property       Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  phone          String // E.164 — the texter who requested the link
+  channel        String       @default("sms") // "sms" | "imessage" | "google_form"
+  inboundMessage String? // first inbound text that triggered this invite (survives the 24h SmsConversation purge)
   expiresAt     DateTime
   usedAt        DateTime?
   applicationId String?      @unique
@@ -645,4 +646,63 @@ model SystemConfig {
   updatedAt DateTime @updatedAt
 
   @@index([key])
+}
+
+// ──────────────── Zillow Leads (Safari import → survey blast) ────────────────
+
+model ZillowImportRun {
+  id          String    @id @default(cuid())
+  status      String    @default("running") // running | done | failed
+  leadsFound  Int       @default(0)
+  leadsNew    Int       @default(0)
+  error       String?
+  rawJsonPath String?
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  leads       ZillowLead[]
+
+  @@index([startedAt])
+}
+
+model ZillowLead {
+  id             String    @id @default(cuid())
+  phone          String? // E.164 after normalization; null when Zillow gave none
+  name           String
+  nameKey        String // lowercased name — dedupe key for phone-less leads
+  email          String?
+  propertyText   String // raw listing address string from Zillow
+  propertyId     String?
+  firstContactAt DateTime?
+  zillowStatus   String?
+  lastMessage    String?
+  status         String    @default("new") // new | invited | applied | opted_out | no_phone
+  inviteId       String?
+  sendError      String?
+  importRunId    String
+  importRun      ZillowImportRun @relation(fields: [importRunId], references: [id])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([phone, propertyId])
+  @@index([status])
+  @@index([firstContactAt])
+}
+
+// ──────────────── Zillow Daily Automation ────────────────
+
+model ZillowAutoRun {
+  id            String    @id @default(cuid())
+  day           String    @unique // "2026-08-27" server-local — the idempotence key
+  status        String    @default("running") // running | done | needs_login | failed
+  attempts      Int       @default(0)
+  leadsFound    Int       @default(0) // latest import's total
+  leadsNew      Int       @default(0) // cumulative new leads today
+  queuedSends   Int       @default(0) // cumulative sent+deferred today
+  sentImmediate Int       @default(0) // cumulative sent-at-run-time today
+  error         String?
+  importRunId   String?
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  @@index([day])
 }

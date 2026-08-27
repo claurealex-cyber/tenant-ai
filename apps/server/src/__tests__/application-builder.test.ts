@@ -239,9 +239,11 @@ describe("saveApplicationField", () => {
   });
 
   it("saves move-in date (future date)", async () => {
-    // Always ~60 days out so the test never rots into the past
+    // Always ~60 days out so the test never rots into the past. Build the ISO
+    // string from LOCAL date parts — toISOString() is UTC and disagrees with
+    // toLocaleDateString for a few hours every evening (UTC-boundary flake).
     const future = new Date(Date.now() + 60 * 86_400_000);
-    const iso = future.toISOString().slice(0, 10);
+    const iso = `${future.getFullYear()}-${String(future.getMonth() + 1).padStart(2, "0")}-${String(future.getDate()).padStart(2, "0")}`;
     const pretty = future.toLocaleDateString("en-US", {
       month: "long",
       day: "numeric",

@@ -1,0 +1,35 @@
+# Tenant AI — public path split behind the single ngrok static domain.
+#
+#   ngrok (TLS)  →  127.0.0.1:3010 (this)  →  Fastify API :3005   for webhook / survey / owner paths
+#                                          →  Dashboard  :3000   for everything else
+#
+# X-Forwarded-Proto is FORCED to https: Caddy overwrites X-Forwarded-* from an
+# untrusted upstream, and Next.js 14 builds req.url from that header — without
+# it every middleware / next-auth redirect would point at http://, which an
+# https-only ngrok endpoint never serves. Safe because we bind loopback only;
+# nothing reaches :3010 except the local ngrok agent, which terminated TLS.
+#
+# /internal/* is deliberately NOT listed: the dashboard calls it over
+# localhost, so publicly it falls through to the dashboard (404).
+{
+	admin off
+	auto_https off
+}
+
+:3010 {
+	bind 127.0.0.1
+
+	@api path /telnyx/* /voice/* /sms/* /survey/* /webhook/* /owner/* /media-stream /health /health/*
+
+	handle @api {
+		reverse_proxy 127.0.0.1:3005 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+}

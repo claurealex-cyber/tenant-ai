@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { resolveSurveyModeConfig, resolveIntakeStyle, normalizeCallerLink, normalizeVoiceIntake, resolveConfig } from "@tenant-ai/shared";
 
 // GET: relay status snapshot. Ledger fields report null until the relay
 // engine (OutboundRelayMessage) ships — the page renders those as "not deployed".
@@ -38,11 +39,41 @@ export async function GET() {
       ledger = null;
     }
 
+    // Effective survey-link mode + intake style (same decisions the server makes).
+    const survey = await resolveSurveyModeConfig(resolveConfig);
+    const intake = await resolveIntakeStyle(resolveConfig);
+    const relayEnabled = (await resolveConfig("sms_relay", "enabled")) === "true";
+    const callers = {
+      callerLink: normalizeCallerLink(await resolveConfig("sms_relay", "caller_link")),
+      voiceIntake: normalizeVoiceIntake(await resolveConfig("sms_relay", "voice_intake")),
+    };
+
+    // AI Q&A replies sent today (relay ledger). null when the relay ledger
+    // model isn't present, so the UI can distinguish "0" from "n/a".
+    let qaToday: number | null = null;
+    try {
+      const anyPrisma = prisma as any;
+      if (anyPrisma.outboundRelayMessage) {
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        qaToday = await anyPrisma.outboundRelayMessage.count({
+          where: { kind: "ai", status: "sent", sentAt: { gte: startOfDay } },
+        });
+      }
+    } catch {
+      qaToday = null;
+    }
+
     return NextResponse.json({
       intakeProperties,
       outstandingInvites,
       optOutCount,
       ledger,
+      survey,
+      intake,
+      relayEnabled,
+      qaToday,
+      callers,
     });
   } catch (error) {
     console.error("SMS relay status GET error:", error);

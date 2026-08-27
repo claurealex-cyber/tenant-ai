@@ -109,6 +109,15 @@ export async function handleIncomingSms(
       },
     });
 
+    // Reflect the opt-out onto any Zillow lead so the dashboard stops
+    // offering (and the batch stops attempting) sends to this phone.
+    await prisma.zillowLead
+      .updateMany({
+        where: { phone: callerPhone, status: { in: ["new", "invited"] } },
+        data: { status: "opted_out" },
+      })
+      .catch(() => undefined);
+
     return {
       replies: [
         "You've been unsubscribed. You will no longer receive messages from this number. Reply START to re-subscribe.",
@@ -197,6 +206,7 @@ export async function handleIncomingSms(
         intakeAutoReply: property.intakeAutoReply,
       },
       callerPhone,
+      body,
     );
     // Persist the exchange so the dashboard Messages tab shows what tenants
     // actually said — zero visibility is not acceptable for a business line.
@@ -516,7 +526,10 @@ export async function handleIncomingSms(
     },
   });
 
-  return { replies, shouldRespond: true };
+  // replyKind "ai": over the relay this is cooldown-exempt and uses the AI
+  // budget — before this, an unset kind mapped to "link" and got cooldown-
+  // skipped for 60 min after the first reply.
+  return { replies, shouldRespond: true, replyKind: "ai" };
 }
 
 /**

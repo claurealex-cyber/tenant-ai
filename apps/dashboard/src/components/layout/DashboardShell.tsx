@@ -31,6 +31,8 @@ const adminNavItems = [
   { label: "Integrations", href: "/admin/integrations", icon: "plug" },
   { label: "Survey Responses", href: "/admin/surveys", icon: "clipboard" },
   { label: "SMS Relay", href: "/admin/sms-relay", icon: "chat" },
+  { label: "Zillow Leads", href: "/admin/zillow", icon: "briefcase" },
+  { label: "SMS Leads", href: "/admin/sms-leads", icon: "chat" },
   { label: "System", href: "/admin/system", icon: "server" },
   { label: "Audit Log", href: "/admin/audit", icon: "clipboard" },
 ];

@@ -300,6 +300,13 @@ export async function surveyRoutes(server: FastifyInstance): Promise<void> {
         forwardSurveySummary(applicationId).catch((err) =>
           request.log.error(`survey forward failed: ${err}`),
         );
+        // Zillow-lead lifecycle: a submitted survey closes the loop.
+        prisma.zillowLead
+          .updateMany({
+            where: { phone: invite.phone, propertyId: invite.propertyId, status: { in: ["new", "invited"] } },
+            data: { status: "applied" },
+          })
+          .catch((err) => request.log.error(`zillow lead applied-flip failed: ${err}`));
         return reply;
       } catch (err) {
         if (err instanceof DuplicateApplicationError) {

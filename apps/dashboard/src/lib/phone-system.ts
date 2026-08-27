@@ -5,6 +5,18 @@ import { prisma } from "@/lib/prisma";
  * Phone system orchestration: brings up the ngrok tunnel that exposes the
  * voice/SMS server to Twilio and keeps the Twilio number webhooks pointed
  * at the routes the server actually serves.
+ *
+ * Tunnel target model. The single static ngrok domain can point at either:
+ *   • the Caddy proxy (PROXY_PORT, default 3010) — path split: webhook/survey
+ *     paths → Fastify, everything else → this dashboard. "Web access ON":
+ *     the dashboard is reachable from the internet on the same domain.
+ *   • the Fastify server directly (SERVER_PORT) — "Web access OFF" / the
+ *     quota kill-switch / the fallback when Caddy isn't running. Phones and
+ *     the hosted survey keep working; the dashboard is local-only.
+ * BOTH are healthy states. Only a tunnel pointed anywhere else is "wrong".
+ * (Before this model, the status check compared the target to SERVER_PORT
+ * only, so the proxy read as broken and "Start" would silently retarget the
+ * tunnel to the server — killing public dashboard access.)
  */
 
 const NGROK_API = process.env.NGROK_API_URL || "http://127.0.0.1:4040";
@@ -31,11 +43,25 @@ export interface PhoneNumberStatus {
   webhooksOk: boolean | null; // null = could not check
 }
 
+/** Where the static domain currently lands. */
+export type TunnelTarget = "proxy" | "server" | "other";
+
 export interface PhoneSystemStatus {
   configured: boolean;
   publicUrl: string | null;
   serverPort: number;
-  tunnel: { running: boolean; forwardsTo: string | null; correct: boolean };
+  proxyPort: number;
+  /** Caddy answering on PROXY_PORT (checked via its /health passthrough). */
+  proxyUp: boolean;
+  tunnel: {
+    running: boolean;
+    forwardsTo: string | null;
+    /** true for BOTH proxy and server targets — only "other" is wrong. */
+    correct: boolean;
+    target: TunnelTarget | null;
+  };
+  /** Dashboard reachable from the internet (tunnel → proxy). */
+  webPublic: boolean;
   publicHealthOk: boolean;
   numbers: PhoneNumberStatus[];
   ready: boolean;
@@ -43,6 +69,41 @@ export interface PhoneSystemStatus {
 
 function serverPort(): number {
   return parseInt(process.env.SERVER_PORT || "3001", 10);
+}
+
+function proxyPort(): number {
+  return parseInt(process.env.PROXY_PORT || "3010", 10);
+}
+
+/** Classify an ngrok `config.addr` (e.g. "http://localhost:3010") by port. */
+export function classifyTunnelTarget(
+  addr: string,
+  ports: { server: number; proxy: number },
+): TunnelTarget {
+  const m = /:(\d+)\/?$/.exec(addr);
+  const port = m ? parseInt(m[1], 10) : NaN;
+  if (port === ports.proxy) return "proxy";
+  if (port === ports.server) return "server";
+  return "other";
+}
+
+/** Is Caddy up on PROXY_PORT? Its /health passthrough must answer from Fastify. */
+async function isProxyUp(): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(`http://127.0.0.1:${proxyPort()}/health`, {}, 1500);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The port the tunnel SHOULD point at when (re)starting: the proxy when it
+ * is up (web access on), else the server directly (phones never wait on Caddy).
+ */
+async function desiredTunnelPort(): Promise<{ port: number; target: TunnelTarget }> {
+  if (await isProxyUp()) return { port: proxyPort(), target: "proxy" };
+  return { port: serverPort(), target: "server" };
 }
 
 async function getTwilioConfig() {
@@ -100,6 +161,70 @@ function tunnelForDomain(
 function tunnelPortMatches(tunnel: NgrokTunnel, port: number): boolean {
   // addr looks like "http://localhost:3001"
   return tunnel.config.addr.endsWith(`:${port}`);
+}
+
+/**
+ * Retarget the static domain to `port` through the running agent's API
+ * (delete + recreate — ngrok tunnels are immutable). Returns null on success,
+ * else a human-readable failure.
+ */
+async function retargetTunnel(publicUrl: string, port: number): Promise<string | null> {
+  const tunnels = await listNgrokTunnels();
+  if (!tunnels) return "ngrok agent is not running";
+  const domain = new URL(publicUrl).host;
+  const existing = tunnelForDomain(tunnels, publicUrl);
+  if (existing && tunnelPortMatches(existing, port)) return null;
+  if (existing) {
+    await fetchWithTimeout(
+      `${NGROK_API}/api/tunnels/${encodeURIComponent(existing.name)}`,
+      { method: "DELETE" },
+      3000
+    ).catch(() => undefined);
+  }
+  const created = await fetchWithTimeout(
+    `${NGROK_API}/api/tunnels`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: TUNNEL_NAME, proto: "http", addr: String(port), domain }),
+    },
+    5000
+  ).catch(() => null);
+  return created?.ok ? null : "ngrok agent is running but the tunnel could not be recreated";
+}
+
+/**
+ * Web access switch: ON → tunnel to the Caddy proxy (dashboard public);
+ * OFF → tunnel straight to the Fastify server (quota kill-switch — phones and
+ * the hosted survey keep working, dashboard goes local-only).
+ */
+export async function setWebAccess(on: boolean): Promise<{ ok: boolean; steps: PhoneSystemStep[] }> {
+  const steps: PhoneSystemStep[] = [];
+  const { publicUrl } = await getTwilioConfig();
+  if (!publicUrl) {
+    steps.push({ name: "Web access", ok: false, detail: "No public URL configured." });
+    return { ok: false, steps };
+  }
+  if (on && !(await isProxyUp())) {
+    steps.push({
+      name: "Web access",
+      ok: false,
+      detail: `Caddy proxy is not answering on 127.0.0.1:${proxyPort()} — start it (start.sh runs it) before turning web access on.`,
+    });
+    return { ok: false, steps };
+  }
+  const port = on ? proxyPort() : serverPort();
+  const err = await retargetTunnel(publicUrl, port);
+  steps.push({
+    name: "Web access",
+    ok: !err,
+    detail:
+      err ??
+      (on
+        ? `ON — ${publicUrl} → proxy :${port} (dashboard public)`
+        : `OFF — ${publicUrl} → server :${port} (dashboard local-only; restore with ./start.sh web-on on the Mac or a Dock relaunch)`),
+  });
+  return { ok: !err, steps };
 }
 
 /**
@@ -286,8 +411,10 @@ export async function startPhoneSystem(): Promise<{
     detail: `Public URL: ${publicUrl}`,
   });
 
-  const port = serverPort();
+  // Never downgrade: proxy when Caddy is up (web access on), else the server.
+  const { port, target } = await desiredTunnelPort();
   const tunnelStep = await ensureTunnel(publicUrl, port);
+  tunnelStep.detail += target === "proxy" ? " (proxy — dashboard public)" : " (server direct — dashboard local-only)";
   steps.push(tunnelStep);
   if (!tunnelStep.ok) return { ready: false, steps };
 
@@ -297,7 +424,7 @@ export async function startPhoneSystem(): Promise<{
     ok: healthy,
     detail: healthy
       ? `${publicUrl}/health responds`
-      : `Server not reachable at ${publicUrl}/health — is the API server running on port ${port}?`,
+      : `Server not reachable at ${publicUrl}/health — is the API server running on port ${serverPort()}${target === "proxy" ? ` (via proxy :${port})` : ""}?`,
   });
   if (!healthy) return { ready: false, steps };
 
@@ -321,18 +448,22 @@ export async function startPhoneSystem(): Promise<{
 export async function getPhoneSystemStatus(): Promise<PhoneSystemStatus> {
   const { accountSid, authToken, publicUrl } = await getTwilioConfig();
   const port = serverPort();
+  const ports = { server: port, proxy: proxyPort() };
   const configured = Boolean(accountSid && authToken && publicUrl);
+  const proxyUp = await isProxyUp();
 
   let tunnelRunning = false;
   let forwardsTo: string | null = null;
   let tunnelCorrect = false;
+  let target: TunnelTarget | null = null;
   if (publicUrl) {
     const tunnels = await listNgrokTunnels();
     const tunnel = tunnels ? tunnelForDomain(tunnels, publicUrl) : null;
     if (tunnel) {
       tunnelRunning = true;
       forwardsTo = tunnel.config.addr;
-      tunnelCorrect = tunnelPortMatches(tunnel, port);
+      target = classifyTunnelTarget(tunnel.config.addr, ports);
+      tunnelCorrect = target !== "other";
     }
   }
 
@@ -382,7 +513,10 @@ export async function getPhoneSystemStatus(): Promise<PhoneSystemStatus> {
     configured,
     publicUrl,
     serverPort: port,
-    tunnel: { running: tunnelRunning, forwardsTo, correct: tunnelCorrect },
+    proxyPort: ports.proxy,
+    proxyUp,
+    tunnel: { running: tunnelRunning, forwardsTo, correct: tunnelCorrect, target },
+    webPublic: tunnelRunning && target === "proxy",
     publicHealthOk,
     numbers,
     ready:

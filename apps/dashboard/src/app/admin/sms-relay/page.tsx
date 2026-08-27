@@ -28,6 +28,16 @@ interface RelayStatus {
   outstandingInvites: number;
   optOutCount: number;
   ledger: { pending: number; failed: number; sent: number } | null;
+  survey?: {
+    requestedMode: "hosted" | "google_form";
+    mode: "hosted" | "google_form";
+    formUrl: string | null;
+    warning: string | null;
+  };
+  intake?: { style: "link_only" | "link_and_qa"; greeting: string };
+  relayEnabled?: boolean;
+  qaToday?: number | null;
+  callers?: { callerLink: "off" | "when_asked" | "every_call"; voiceIntake: "phone" | "link" };
 }
 
 export default function SmsRelayPage() {
@@ -92,7 +102,8 @@ export default function SmsRelayPage() {
         body: JSON.stringify({ integrationId: "sms_relay", values }),
       });
       if (res.ok) {
-        setBanner({ kind: "ok", text: "Settings saved. The server picks up changes within 60 seconds." });
+        await fetch("/api/admin/sms-relay/refresh-config", { method: "POST" }).catch(() => {});
+        setBanner({ kind: "ok", text: "Settings saved and live now." });
         setFieldValues({});
         await load();
       } else {
@@ -103,6 +114,46 @@ export default function SmsRelayPage() {
       setBanner({ kind: "err", text: "Save failed" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const setRelayField = async (key: string, value: string, okText: string) => {
+    setBanner(null);
+    try {
+      const res = await fetch("/api/admin/integrations", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ integrationId: "sms_relay", values: { [key]: value } }),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); setBanner({ kind: "err", text: d.error || "Could not save" }); return; }
+      await fetch("/api/admin/sms-relay/refresh-config", { method: "POST" }).catch(() => {});
+      setBanner({ kind: "ok", text: okText });
+      await load();
+    } catch { setBanner({ kind: "err", text: "Could not save" }); }
+  };
+
+  const setIntakeStyle = async (style: "link_only" | "link_and_qa") => {
+    if (status?.intake?.style === style) return;
+    setBanner(null);
+    try {
+      const res = await fetch("/api/admin/integrations", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ integrationId: "sms_relay", values: { intake_style: style } }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setBanner({ kind: "err", text: data.error || "Could not change reply style" });
+        return;
+      }
+      // Make it live in the server process immediately (no 60s wait).
+      await fetch("/api/admin/sms-relay/refresh-config", { method: "POST" }).catch(() => {});
+      setBanner({
+        kind: "ok",
+        text: style === "link_and_qa" ? "Reply style: Link + Q&A (live now)" : "Reply style: Link only (live now)",
+      });
+      await load();
+    } catch {
+      setBanner({ kind: "err", text: "Could not change reply style" });
     }
   };
 
@@ -207,6 +258,126 @@ export default function SmsRelayPage() {
                   </dd>
                 </div>
               </dl>
+              {/* Survey link mode — what intake texts / Zillow blasts actually send */}
+              {status?.survey && (
+                <div className="mt-4 border-t border-gray-100 pt-4" data-testid="survey-mode">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-gray-500">Survey link:</span>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                        status.survey.mode === "google_form"
+                          ? "bg-green-100 text-green-800"
+                          : "bg-blue-100 text-blue-800"
+                      }`}
+                    >
+                      {status.survey.mode === "google_form" ? "Google Form" : "Hosted survey"}
+                    </span>
+                    {status.survey.mode === "google_form" && status.survey.formUrl && (
+                      <a
+                        href={status.survey.formUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="truncate text-xs text-blue-600 hover:underline"
+                        style={{ maxWidth: "32rem" }}
+                      >
+                        {status.survey.formUrl}
+                      </a>
+                    )}
+                  </div>
+                  {status.survey.warning && (
+                    <p className="mt-2 text-xs text-amber-700">⚠ {status.survey.warning}</p>
+                  )}
+                </div>
+              )}
+              {/* Intake reply style — one-click switch */}
+              {status?.intake && (
+                <div className="mt-4 border-t border-gray-100 pt-4" data-testid="intake-style">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-gray-500">Reply style:</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-gray-300">
+                      <button
+                        type="button"
+                        onClick={() => setIntakeStyle("link_only")}
+                        className={`px-3 py-1 text-xs font-medium ${
+                          status.intake.style === "link_only"
+                            ? "bg-blue-600 text-white"
+                            : "bg-white text-gray-700 hover:bg-gray-50"
+                        }`}
+                      >
+                        Link only
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIntakeStyle("link_and_qa")}
+                        className={`border-l border-gray-300 px-3 py-1 text-xs font-medium ${
+                          status.intake.style === "link_and_qa"
+                            ? "bg-blue-600 text-white"
+                            : "bg-white text-gray-700 hover:bg-gray-50"
+                        }`}
+                      >
+                        Link + Q&amp;A
+                      </button>
+                    </div>
+                    <span className="text-xs text-gray-400">
+                      {status.intake.style === "link_and_qa"
+                        ? "Greeting + link, then the AI answers property questions"
+                        : "Texts the application link only"}
+                    </span>
+                  </div>
+                  {status.intake.style === "link_and_qa" && status.relayEnabled && (
+                    <p className="mt-2 text-xs text-amber-700">
+                      Relay is on: Q&amp;A answers go out from the personal number under their own caps.
+                    </p>
+                  )}
+                  {status.intake.style === "link_and_qa" && typeof status.qaToday === "number" && (
+                    <p className="mt-1 text-xs text-gray-500">Q&amp;A replies today: {status.qaToday}</p>
+                  )}
+                </div>
+              )}
+              {/* Callers — text the application link to phone callers */}
+              {status?.callers && (
+                <div className="mt-4 border-t border-gray-100 pt-4" data-testid="caller-controls">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-gray-500">Text callers the link:</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-gray-300">
+                      {(["off", "when_asked", "every_call"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setRelayField("caller_link", m, `Callers: ${m.replace("_", " ")} (live)`)}
+                          className={`px-3 py-1 text-xs font-medium ${m !== "off" ? "border-l border-gray-300" : ""} ${
+                            status.callers!.callerLink === m ? "bg-blue-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+                          }`}
+                        >
+                          {m === "off" ? "Off" : m === "when_asked" ? "When asked" : "Every call"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-gray-500">Phone application:</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-gray-300">
+                      {(["phone", "link"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          disabled={m === "link" && status.callers!.callerLink === "off"}
+                          title={m === "link" && status.callers!.callerLink === "off" ? "Turn on 'Text callers the link' first" : ""}
+                          onClick={() => setRelayField("voice_intake", m, `Phone application: ${m === "link" ? "link only" : "by phone"} (live)`)}
+                          className={`px-3 py-1 text-xs font-medium ${m === "link" ? "border-l border-gray-300" : ""} disabled:opacity-40 ${
+                            status.callers!.voiceIntake === m ? "bg-blue-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+                          }`}
+                        >
+                          {m === "phone" ? "Take it by phone" : "Link only"}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-xs text-gray-400">
+                      {status.callers!.voiceIntake === "link" ? "AI answers + texts the link (no phone application)" : "AI takes the application by voice"}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Property intake toggles */}
