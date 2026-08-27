@@ -38,6 +38,7 @@ import { POST as togglePost } from "../app/api/admin/zillow/auto-toggle/route";
 import { decrypt } from "@tenant-ai/shared";
 
 const adminSession = { user: { role: "admin", id: "admin-1" } };
+let existingBaseline: string | null = null;
 
 function toggleReq(body: unknown) {
   return new NextRequest("http://x/api/admin/zillow/auto-toggle", {
@@ -48,7 +49,11 @@ function toggleReq(body: unknown) {
 
 beforeEach(() => {
   mockGetServerSession.mockReset().mockResolvedValue(adminSession);
-  mockResolveConfig.mockReset().mockResolvedValue("secret-x");
+  existingBaseline = null;
+  mockResolveConfig.mockReset().mockImplementation(async (ns: string, key: string) => {
+    if (ns === "zillow" && key === "auto_baseline") return existingBaseline;
+    return "secret-x";
+  });
   mockFetch.mockReset();
   mockUpsert.mockReset().mockResolvedValue({});
   mockAudit.mockReset().mockResolvedValue({});
@@ -100,24 +105,23 @@ describe("auto-toggle", () => {
   });
 
   it("enabling writes ENCRYPTED flag + today-baseline and audit-logs", async () => {
-    const res = await togglePost(toggleReq({ enabled: true, baselineMode: "today" }));
+    const res = await togglePost(toggleReq({ enabled: true, baselineMode: "new" }));
     expect(res.status).toBe(200);
 
     const writes = Object.fromEntries(
       mockUpsert.mock.calls.map(([args]: any[]) => [args.where.key, args.create.value]),
     );
     expect(Object.keys(writes).sort()).toEqual(["zillow.auto_baseline", "zillow.auto_enabled"]);
-    // values must be encrypted at rest (v1: prefix) and decrypt to the plaintext
     expect(writes["zillow.auto_enabled"]).toMatch(/^v1:/);
     expect(decrypt(writes["zillow.auto_enabled"])).toBe("true");
+    // First enable with no existing baseline → baseline = NOW (import-time boundary).
     const baseline = new Date(decrypt(writes["zillow.auto_baseline"]));
-    expect(baseline.getHours()).toBe(0); // local midnight today
-    expect(Date.now() - baseline.getTime()).toBeLessThan(86_400_000 + 60_000);
+    expect(Date.now() - baseline.getTime()).toBeLessThan(60_000);
 
     expect(mockAudit).toHaveBeenCalledTimes(1);
     expect(mockAudit.mock.calls[0][0].data).toMatchObject({
       action: "zillow_automation_toggle",
-      metadata: { enabled: true, baselineMode: "today" },
+      metadata: { enabled: true, baselineMode: "new", resetBaseline: false },
     });
   });
 
@@ -127,6 +131,22 @@ describe("auto-toggle", () => {
       mockUpsert.mock.calls.map(([args]: any[]) => [args.where.key, args.create.value]),
     );
     expect(decrypt(writes["zillow.auto_baseline"])).toBe(new Date(0).toISOString());
+  });
+
+  it("re-enable PRESERVES an existing baseline (set-once) — does not move it forward", async () => {
+    existingBaseline = "2026-08-01T12:00:00.000Z"; // a real earlier baseline
+    await togglePost(toggleReq({ enabled: true, baselineMode: "new" }));
+    const keys = mockUpsert.mock.calls.map(([a]: any[]) => a.where.key);
+    expect(keys).toContain("zillow.auto_enabled");
+    expect(keys).not.toContain("zillow.auto_baseline"); // baseline untouched on re-enable
+  });
+
+  it("resetBaseline forces the baseline to now even when one exists", async () => {
+    existingBaseline = "2026-08-01T12:00:00.000Z";
+    await togglePost(toggleReq({ enabled: true, baselineMode: "new", resetBaseline: true }));
+    const writes = Object.fromEntries(mockUpsert.mock.calls.map(([a]: any[]) => [a.where.key, a.create.value]));
+    expect(writes["zillow.auto_baseline"]).toBeTruthy();
+    expect(Date.now() - new Date(decrypt(writes["zillow.auto_baseline"])).getTime()).toBeLessThan(60_000);
   });
 
   it("disabling writes only the flag and never touches the baseline", async () => {

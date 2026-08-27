@@ -6,12 +6,13 @@ export async function POST(request: NextRequest) {
   const forbidden = await requireAdmin();
   if (forbidden) return forbidden;
   try {
-    const { leadId } = await request.json().catch(() => ({}));
+    const { leadId, manual } = await request.json().catch(() => ({}));
     if (typeof leadId !== "string" || !leadId) {
       return NextResponse.json({ error: "leadId required" }, { status: 400 });
     }
     const res = await proxyToServer(`/internal/zillow/leads/${encodeURIComponent(leadId)}/send`, {
       method: "POST",
+      body: { manual: manual === true },
       timeoutMs: 30_000,
     });
     return NextResponse.json(await res.json(), { status: res.status });

@@ -15,12 +15,15 @@ import {
  * tenant-facing is fire-and-forget without a persistent record to retry from.
  */
 
-export type RelayKind = "link" | "forward" | "heartbeat" | "test" | "confirmation" | "ai";
+export type RelayKind = "link" | "forward" | "heartbeat" | "test" | "confirmation" | "ai" | "caller" | "intake";
 
 export interface RelayMeta {
   kind: RelayKind;
   inviteId?: string;
   applicationId?: string;
+  /** Manual/operator resend: skip the per-phone link cooldown (a hand-retry
+   *  must not be blocked because a link went recently). Caps + opt-out stay. */
+  bypassCooldown?: boolean;
 }
 
 const MAX_ATTEMPTS = 5;
@@ -52,6 +55,7 @@ export interface RelayOutcome {
   id: string | null;
   status: "sent" | "deferred" | "failed" | "skipped";
   reason?: string;
+  retryAfter?: Date;
 }
 
 /**
@@ -100,7 +104,8 @@ export async function relaySendWithGuards(
     });
 
     // Per-tenant cooldown — survey links only, keyed on delivered-ish links.
-    if (meta.kind === "link") {
+    // A manual resend (bypassCooldown) skips it; caps + opt-out still apply.
+    if (meta.kind === "link" && !meta.bypassCooldown) {
       const cooldownMin = await cfgInt("cooldown_minutes", 60);
       if (cooldownMin > 0) {
         const since = new Date(Date.now() - cooldownMin * 60_000);
@@ -125,11 +130,12 @@ export async function relaySendWithGuards(
 
     const capped = await checkCaps(to, meta.kind);
     if (capped) {
+      const capLine = formatCapBlock(capped);
       await prisma.outboundRelayMessage.update({
         where: { id: row.id },
-        data: { status: "deferred", lastError: capped },
+        data: { status: "deferred", lastError: capLine },
       });
-      return { id: row.id, status: "deferred", reason: capped };
+      return { id: row.id, status: "deferred", reason: capped.reason, retryAfter: capped.retryAfter };
     }
 
     return await attemptSend(row.id, to, text);
@@ -138,13 +144,29 @@ export async function relaySendWithGuards(
   }
 }
 
-/** Cap check. Returns a reason string when the send must be deferred. */
-async function checkCaps(to: string, kind: RelayKind): Promise<string | null> {
-  const hourAgo = new Date(Date.now() - 3600_000);
-  const dayAgo = new Date(Date.now() - 86_400_000);
+export interface CapBlock {
+  reason: string;
+  /** When the rolling window frees enough for this send to go (best estimate). */
+  retryAfter: Date;
+}
 
-  // AI Q&A replies have their OWN global budget, counted over kind="ai" rows
-  // only — they never draw down the link/forward budget and vice versa.
+/** Oldest `sentAt` among rows matching `where`, +windowMs → when the window frees. */
+async function windowFreesAt(where: object, windowMs: number): Promise<Date> {
+  const oldest = await prisma.outboundRelayMessage.findFirst({
+    where: { ...where, status: "sent", sentAt: { not: null } },
+    orderBy: { sentAt: "asc" },
+    select: { sentAt: true },
+  });
+  const base = oldest?.sentAt ? oldest.sentAt.getTime() : Date.now();
+  return new Date(base + windowMs);
+}
+
+/** Cap check. Returns { reason, retryAfter } when the send must be deferred. */
+async function checkCaps(to: string, kind: RelayKind): Promise<CapBlock | null> {
+  const hourMs = 3600_000, dayMs = 86_400_000;
+  const hourAgo = new Date(Date.now() - hourMs);
+  const dayAgo = new Date(Date.now() - dayMs);
+
   if (kind === "ai") {
     const qaHourly = await cfgInt("qa_hourly_cap", 10);
     const qaDaily = await cfgInt("qa_daily_cap", 40);
@@ -152,45 +174,52 @@ async function checkCaps(to: string, kind: RelayKind): Promise<string | null> {
       prisma.outboundRelayMessage.count({ where: { status: "sent", kind: "ai", sentAt: { gt: hourAgo } } }),
       prisma.outboundRelayMessage.count({ where: { status: "sent", kind: "ai", sentAt: { gt: dayAgo } } }),
     ]);
-    if (aiHour >= qaHourly) return "qa hourly cap";
-    if (aiDay >= qaDaily) return "qa daily cap";
+    if (aiHour >= qaHourly) return { reason: "qa hourly cap", retryAfter: await windowFreesAt({ kind: "ai", sentAt: { gt: hourAgo } }, hourMs) };
+    if (aiDay >= qaDaily) return { reason: "qa daily cap", retryAfter: await windowFreesAt({ kind: "ai", sentAt: { gt: dayAgo } }, dayMs) };
     return null;
   }
 
   const hourlyCap = await cfgInt("hourly_cap", 5);
   const dailyCap = await cfgInt("daily_cap", 25);
-  const newRecipientCap = 10;
+  // Configurable carrier-safety guard on first-contact sends per day
+  // (sms_relay.new_recipient_cap). Default 10 keeps the personal number safe.
+  const newRecipientCap = await cfgInt("new_recipient_cap", 10);
 
   const [sentLastHour, sentLastDay] = await Promise.all([
     prisma.outboundRelayMessage.count({ where: { status: "sent", kind: { not: "ai" }, sentAt: { gt: hourAgo } } }),
     prisma.outboundRelayMessage.count({ where: { status: "sent", kind: { not: "ai" }, sentAt: { gt: dayAgo } } }),
   ]);
 
-  // Reserve 2 slots/hour for forwards so links can't starve summaries.
   const effectiveHourly =
     kind === "forward" || kind === "heartbeat" ? hourlyCap : Math.max(1, hourlyCap - 2);
-  if (sentLastHour >= effectiveHourly) return "hourly cap";
-  if (sentLastDay >= dailyCap) return "daily cap";
+  if (sentLastHour >= effectiveHourly)
+    return { reason: "hourly cap", retryAfter: await windowFreesAt({ kind: { not: "ai" }, sentAt: { gt: hourAgo } }, hourMs) };
+  if (sentLastDay >= dailyCap)
+    return { reason: "daily cap", retryAfter: await windowFreesAt({ kind: { not: "ai" }, sentAt: { gt: dayAgo } }, dayMs) };
 
-  // New-recipient cap: first-contact sends per day.
-  const priorToRecipient = await prisma.outboundRelayMessage.count({
-    where: { to, status: "sent" },
-  });
+  const priorToRecipient = await prisma.outboundRelayMessage.count({ where: { to, status: "sent" } });
   if (priorToRecipient === 0) {
     const firstContactsToday = await prisma.outboundRelayMessage.groupBy({
-      by: ["to"],
-      where: { status: "sent", sentAt: { gt: dayAgo } },
+      by: ["to"], where: { status: "sent", sentAt: { gt: dayAgo } },
     });
     const knownBefore = await prisma.outboundRelayMessage.groupBy({
-      by: ["to"],
-      where: { status: "sent", sentAt: { lte: dayAgo } },
+      by: ["to"], where: { status: "sent", sentAt: { lte: dayAgo } },
     });
     const known = new Set(knownBefore.map((r) => r.to));
     const newToday = firstContactsToday.filter((r) => !known.has(r.to)).length;
-    if (newToday >= newRecipientCap) return "new-recipient cap";
+    if (newToday >= newRecipientCap)
+      return { reason: "new-recipient daily cap", retryAfter: await windowFreesAt({ kind: { not: "ai" }, sentAt: { gt: dayAgo } }, dayMs) };
   }
 
   return null;
+}
+
+/** Human, operator-facing cap line: "daily cap — retry after Aug 28, 9:12 AM". */
+export function formatCapBlock(cap: CapBlock): string {
+  const t = cap.retryAfter.toLocaleString("en-US", {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  return `${cap.reason} — retry after ${t}`;
 }
 
 /** Send an existing ledger row and record the outcome on it. */
@@ -263,7 +292,14 @@ export async function sweepOnce(log: (msg: string) => void = () => {}): Promise<
         continue;
       }
       const capped = await checkCaps(row.to, row.kind as RelayKind);
-      if (capped) continue; // stays deferred/failed for a later sweep
+      if (capped) {
+        // Refresh the retry-after estimate so the dashboard stays current.
+        await prisma.outboundRelayMessage.update({
+          where: { id: row.id },
+          data: { status: "deferred", lastError: formatCapBlock(capped) },
+        }).catch(() => undefined);
+        continue; // stays deferred for a later sweep
+      }
       const outcome = await attemptSend(row.id, row.to, row.body);
       log(`relay sweep: row ${row.id} → ${outcome.status}`);
       sends++;

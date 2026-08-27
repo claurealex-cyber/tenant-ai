@@ -120,7 +120,17 @@ export async function processTelnyxInbound(
         await relaySendWithGuards(
           from,
           rewriteForRelay(reply, property?.name ?? "Property", to),
-          { kind: result.replyKind === "confirmation" ? "confirmation" : result.replyKind === "ai" ? "ai" : "link" },
+          {
+            // Inbound intake replies are cooldown-EXEMPT so a texter who already
+            // got the link still re-receives it. Zillow blasts call the relay
+            // directly with kind "link" and keep their per-lead cooldown.
+            kind:
+              result.replyKind === "confirmation"
+                ? "confirmation"
+                : result.replyKind === "ai"
+                  ? "ai"
+                  : "intake",
+          },
         );
       } else {
         await sendTelnyxSms(to, from, reply);

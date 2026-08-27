@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
       return v && (allowed as string[]).includes(v) ? (v as T) : undefined;
     };
     const filters: SmsLeadFilters = {
-      origin: pick("origin", ["texted_in", "zillow"]),
+      origin: pick("origin", ["texted_in", "zillow", "called"]),
       linkKind: pick("linkKind", ["google_form", "hosted", "none"]),
       state: pick("state", ["applied", "opted_out", "invited", "contacted"]),
       includeTenants: params.get("includeTenants") === "true",

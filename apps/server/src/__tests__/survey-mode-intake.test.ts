@@ -169,22 +169,17 @@ describe("handleSurveyIntake honors the mode", () => {
     expect(res.shouldRespond).toBe(true);
   });
 
-  it("a phone that already completed a hosted application gets the ack in google_form mode too", async () => {
+  it("a phone that already applied STILL gets the intro + link (ack gate removed)", async () => {
     const p = phone();
     await prisma.application.create({
-      data: {
-        propertyId,
-        callerPhone: p,
-        channel: "sms_link",
-        status: "completed",
-        completedAt: new Date(),
-      } as any,
+      data: { propertyId, callerPhone: p, channel: "sms_link", status: "completed", completedAt: new Date() } as any,
     });
     cfg.survey_mode = "google_form";
     cfg.google_form_url = FORM;
     const res = await handleSurveyIntake(property(), p);
-    expect(res.replyKind).toBe("confirmation");
-    expect(res.replies[0]).not.toContain(FORM);
+    expect(res.replyKind).not.toBe("confirmation");
+    expect(res.replies[0]).toContain(FORM);
+    expect(res.replies[0]).not.toContain("We received your application");
   });
 
   it("relay rewrite leaves the Google Form URL byte-for-byte intact", () => {
@@ -260,14 +255,15 @@ describe("intake_style routing (M2)", () => {
     expect(again.replyKind).toBe("link");
   });
 
-  it("completed application → ack in link_and_qa too (no greeting, no Q&A)", async () => {
+  it("completed application → STILL gets the greeting + link in link_and_qa (ack gate removed)", async () => {
     cfg.intake_style = "link_and_qa";
     const p = phone();
     await prisma.application.create({
       data: { propertyId, callerPhone: p, channel: "sms_link", status: "completed", completedAt: new Date() } as any,
     });
     const res = await handleSurveyIntake(property(), p, "hello");
-    expect(res.replyKind).toBe("confirmation");
-    expect(res.replies[0]).toContain("We received your application");
+    expect(res.replyKind).toBe("link");
+    expect(res.replies[0]).toContain("Have questions about the property");
+    expect(res.replies[0]).not.toContain("We received your application");
   });
 });

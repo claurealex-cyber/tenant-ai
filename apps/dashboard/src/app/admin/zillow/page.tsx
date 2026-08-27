@@ -15,7 +15,7 @@ interface ZillowLead {
   lastMessage: string | null;
   status: string;
   sendError: string | null;
-  delivery: { status: string; lastError: string | null; sentAt: string | null } | null;
+  delivery: { status: string; lastError: string | null; sentAt: string | null; body?: string | null; kind?: string | null } | null;
 }
 
 interface ImportRun {
@@ -49,6 +49,9 @@ export default function ZillowLeadsPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [page, setPage] = useState(0);
   const [confirmBatch, setConfirmBatch] = useState(false);
+  const [autoInfo, setAutoInfo] = useState<{ enabled: boolean; startHour?: number; endHour?: number; runHours?: number[] | null; nextRunLabel?: string | null } | null>(null);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [pollPaused, setPollPaused] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -58,12 +61,48 @@ export default function ZillowLeadsPage() {
       ]);
       if (leadsRes.ok) setLeads((await leadsRes.json()).leads || []);
       if (runsRes.ok) setRuns((await runsRes.json()).runs || []);
+      setLastRefreshed(new Date());
     } catch {
       setBanner({ kind: "err", text: "Failed to load Zillow leads" });
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // Visibility-gated auto-refresh: poll the SMALL auto-status every 2 min; only
+  // refetch the (large) lead list when the automation's lead total / last run
+  // changed. Pauses when the tab is hidden and stops after repeated failures —
+  // every request is metered on the ngrok Free quota.
+  useEffect(() => {
+    let stopped = false, failures = 0, sig = "";
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch("/api/admin/zillow/auto-status", { cache: "no-store" });
+        if (!res.ok) throw new Error("status");
+        const st = await res.json();
+        setAutoInfo({ enabled: st.enabled, startHour: st.startHour, endHour: st.endHour, runHours: st.runHours, nextRunLabel: st.nextRunLabel });
+        const newSig = `${st.totals?.leads}|${st.today?.status}|${st.today?.leadsNew}|${st.today?.sentImmediate}`;
+        if (sig && newSig !== sig) await load(); // automation did something → refresh the list
+        sig = newSig;
+        failures = 0;
+        setPollPaused(false);
+      } catch {
+        if (++failures >= 3) { stopped = true; setPollPaused(true); if (interval) clearInterval(interval); }
+      }
+    };
+    const start = () => { if (!interval && !stopped) interval = setInterval(tick, 120_000); };
+    const stop = () => { if (interval) clearInterval(interval); interval = null; };
+    const onVis = () => {
+      if (document.visibilityState === "visible") { if (!stopped) { tick(); start(); } }
+      else stop();
+    };
+    tick();
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVis);
+    return () => { stopped = true; stop(); document.removeEventListener("visibilitychange", onVis); };
+  }, [load]);
 
   useEffect(() => {
     load();
@@ -94,18 +133,24 @@ export default function ZillowLeadsPage() {
     }
   };
 
-  const sendOne = async (leadId: string) => {
+  const sendOne = async (leadId: string, manual = false) => {
     setSendingId(leadId);
     setBanner(null);
     try {
       const res = await fetch("/api/admin/zillow/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leadId }),
+        body: JSON.stringify({ leadId, manual }),
       });
       const data = await res.json().catch(() => ({}));
-      if (data.result === "sent") setBanner({ kind: "ok", text: "Survey link sent." });
-      else if (data.result === "deferred") setBanner({ kind: "ok", text: "Queued — the relay caps are pacing sends; it goes out automatically." });
+      if (data.result === "sent") setBanner({ kind: "ok", text: "Application link sent." });
+      else if (data.result === "deferred")
+        setBanner({
+          kind: "ok",
+          text: data.detail
+            ? `Cap reached — queued. ${data.detail}. It sends automatically then; you can also retry after that time.`
+            : "Queued — the relay caps are pacing sends; it goes out automatically.",
+        });
       else setBanner({ kind: "err", text: `Not sent: ${data.detail || data.result}` });
       await load();
     } catch {
@@ -152,7 +197,12 @@ export default function ZillowLeadsPage() {
   const estDays = Math.max(1, Math.ceil(sendable / 25));
 
   const filtered = useMemo(
-    () => (statusFilter ? leads.filter((l) => l.status === statusFilter) : leads),
+    () =>
+      statusFilter === "__link_sent"
+        ? leads.filter((l) => l.delivery?.status === "sent")
+        : statusFilter
+          ? leads.filter((l) => l.status === statusFilter)
+          : leads,
     [leads, statusFilter],
   );
   const pageLeads = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -292,6 +342,7 @@ export default function ZillowLeadsPage() {
                 className="rounded-md border border-gray-300 px-2 py-1.5 text-sm"
               >
                 <option value="">All statuses</option>
+                <option value="__link_sent">Link sent ✓</option>
                 <option value="new">New</option>
                 <option value="invited">Invited</option>
                 <option value="applied">Applied</option>
@@ -301,6 +352,31 @@ export default function ZillowLeadsPage() {
               <span className="text-xs text-gray-500">
                 {filtered.length} {filtered.length === 1 ? "lead" : "leads"}
               </span>
+            </div>
+
+            {/* Automation status line */}
+            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+              {autoInfo && (
+                <span>
+                  Automation:{" "}
+                  <span className={autoInfo.enabled ? "font-medium text-green-700" : "text-gray-500"}>
+                    {autoInfo.enabled ? "ON" : "OFF"}
+                  </span>
+                  {autoInfo.enabled && (
+                    <>
+                      {" "}· {autoInfo.runHours && autoInfo.runHours.length
+                        ? `${autoInfo.runHours.length}×/day ${autoInfo.runHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(", ")}`
+                        : `hourly ${autoInfo.startHour ?? 8}:00–${autoInfo.endHour ?? 22}:00`}
+                      {autoInfo.nextRunLabel ? ` · next run ${autoInfo.nextRunLabel}` : ""}
+                    </>
+                  )}
+                </span>
+              )}
+              {lastRefreshed && (
+                <span>· updated {lastRefreshed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+              )}
+              {pollPaused && <span className="text-amber-600">· auto-refresh paused (reload to resume)</span>}
+              <button onClick={() => load()} className="text-blue-600 hover:underline">refresh now</button>
             </div>
 
             {/* Table */}
@@ -321,7 +397,31 @@ export default function ZillowLeadsPage() {
                 <tbody className="divide-y divide-gray-100">
                   {pageLeads.map((lead) => (
                     <tr key={lead.id} className={lead.status === "opted_out" ? "opacity-50" : ""}>
-                      <td className="px-4 py-3 font-medium text-gray-900">{lead.name}</td>
+                      <td className="px-4 py-3 font-medium text-gray-900">
+                        <div className="flex items-center gap-2">
+                          {lead.phone && lead.status !== "opted_out" && (
+                            <button
+                              onClick={() => sendOne(lead.id, lead.status !== "new")}
+                              disabled={sendingId === lead.id}
+                              title={
+                                lead.status === "new"
+                                  ? "Text this lead the application link"
+                                  : "Re-text the application link (manual retry — skips the cooldown)"
+                              }
+                              className="shrink-0 rounded-md border border-green-600 px-2 py-0.5 text-xs font-medium text-green-700 hover:bg-green-50 disabled:opacity-50"
+                            >
+                              {sendingId === lead.id
+                                ? "…"
+                                : lead.status === "new"
+                                  ? "Send link"
+                                  : lead.status === "invited"
+                                    ? "Resend"
+                                    : "Retry"}
+                            </button>
+                          )}
+                          <span>{lead.name}</span>
+                        </div>
+                      </td>
                       <td className="px-4 py-3 text-gray-600">{lead.phone ?? "—"}</td>
                       <td className="max-w-[180px] truncate px-4 py-3 text-gray-600" title={lead.propertyText}>
                         {lead.propertyText || "—"}
@@ -341,14 +441,22 @@ export default function ZillowLeadsPage() {
                           </div>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-xs text-gray-600">
+                      <td
+                        className="px-4 py-3 text-xs text-gray-600"
+                        title={lead.delivery?.body ?? ""}
+                      >
                         {lead.delivery
                           ? lead.delivery.status === "sent"
-                            ? `sent ${lead.delivery.sentAt ? new Date(lead.delivery.sentAt).toLocaleDateString() : ""}`
+                            ? `link sent ${lead.delivery.sentAt ? new Date(lead.delivery.sentAt).toLocaleDateString() : ""}`
                             : lead.delivery.status === "deferred"
                               ? "queued"
                               : `${lead.delivery.status}${lead.delivery.lastError ? `: ${lead.delivery.lastError}` : ""}`
                           : "—"}
+                        {lead.delivery?.body && (
+                          <span className="ml-1 cursor-help text-blue-500" title={lead.delivery.body}>
+                            ⓘ
+                          </span>
+                        )}
                       </td>
                       <td className="max-w-[220px] truncate px-4 py-3 text-xs text-gray-500" title={lead.lastMessage ?? ""}>
                         {lead.lastMessage ?? "—"}

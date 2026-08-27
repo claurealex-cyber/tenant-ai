@@ -23,6 +23,7 @@ import { aplEscape, aplString, isTccError } from "../services/messages-relay.js"
 import {
   relaySendWithGuards,
   sanitizeForSms,
+  formatCapBlock,
 } from "../services/relay-guards.js";
 import {
   rewriteForRelay,
@@ -490,5 +491,68 @@ describe("ai kind budget isolation + cooldown exemption", () => {
     const row = await prisma.outboundRelayMessage.findUnique({ where: { id: ai.id! } });
     expect(row?.kind).toBe("ai"); // stored as ai (own budget), not remapped to link
     await prisma.outboundRelayMessage.deleteMany({ where: { to: P } });
+  });
+});
+
+describe("caller-link cooldown exemption", () => {
+  it("a 'caller' link is NOT blocked by a recent 'link' cooldown (caller who texted then called)", async () => {
+    const P = `+1312${(Date.now() + 11).toString().slice(-7)}`;
+    const first = await relaySendWithGuards(P, "greeting link", { kind: "link" });
+    expect(first.status).toBe("sent"); // sets the link cooldown for this phone
+    // A normal link now would be cooldown-skipped:
+    const blocked = await relaySendWithGuards(P, "link again", { kind: "link" });
+    expect(blocked.status).toBe("skipped");
+    expect(blocked.reason).toBe("cooldown");
+    // But a CALLER link bypasses the cooldown and sends:
+    const caller = await relaySendWithGuards(P, "here is the link (you called)", { kind: "caller" });
+    expect(caller.status).toBe("sent");
+    const row = await prisma.outboundRelayMessage.findUnique({ where: { id: caller.id! } });
+    expect(row?.kind).toBe("caller");
+    await prisma.outboundRelayMessage.deleteMany({ where: { to: P } });
+  });
+});
+
+describe("intake greeting cooldown exemption (resend the link even if already received)", () => {
+  it("kind 'intake' resends even right after a prior intake, while kind 'link' (Zillow) still cools down", async () => {
+    const P = `+1312${(Date.now() + 13).toString().slice(-7)}`;
+    // First intake greeting to this phone:
+    const first = await relaySendWithGuards(P, "intro + link", { kind: "intake" });
+    expect(first.status).toBe("sent");
+    // Immediately again — a person who already got the link must RE-receive it:
+    const again = await relaySendWithGuards(P, "intro + link again", { kind: "intake" });
+    expect(again.status).toBe("sent"); // NOT skipped/cooldown
+    const row = await prisma.outboundRelayMessage.findUnique({ where: { id: again.id! } });
+    expect(row?.kind).toBe("intake");
+    // A Zillow-style link to the SAME phone still respects the cooldown:
+    const zillow = await relaySendWithGuards(P, "zillow blast link", { kind: "link" });
+    expect(["sent", "skipped"]).toContain(zillow.status); // first link may send; a second would cool down
+    const zillow2 = await relaySendWithGuards(P, "zillow blast link 2", { kind: "link" });
+    expect(zillow2.status).toBe("skipped");
+    expect(zillow2.reason).toBe("cooldown");
+    await prisma.outboundRelayMessage.deleteMany({ where: { to: P } });
+  });
+});
+
+describe("bypassCooldown (manual resend)", () => {
+  it("a link with bypassCooldown sends even inside the cooldown window; without it, cools down", async () => {
+    const P = `+1312${(Date.now() + 17).toString().slice(-7)}`;
+    const first = await relaySendWithGuards(P, "link 1", { kind: "link" });
+    expect(first.status).toBe("sent");
+    const blocked = await relaySendWithGuards(P, "link 2", { kind: "link" });
+    expect(blocked.status).toBe("skipped");
+    expect(blocked.reason).toBe("cooldown");
+    const manual = await relaySendWithGuards(P, "manual resend", { kind: "link", bypassCooldown: true });
+    expect(manual.status).toBe("sent");
+    const row = await prisma.outboundRelayMessage.findUnique({ where: { id: manual.id! } });
+    expect(row?.kind).toBe("link"); // kind stays link → counters/join unaffected
+    await prisma.outboundRelayMessage.deleteMany({ where: { to: P } });
+  });
+});
+
+describe("formatCapBlock (retry-after message)", () => {
+  it("renders reason + a human retry-after time", () => {
+    const out = formatCapBlock({ reason: "new-recipient daily cap", retryAfter: new Date("2026-08-28T14:12:00") });
+    expect(out).toMatch(/^new-recipient daily cap — retry after /);
+    expect(out).toMatch(/Aug 28/);
   });
 });

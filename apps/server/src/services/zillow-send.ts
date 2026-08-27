@@ -34,10 +34,18 @@ export function zillowLeadCopy(propertyName: string, url: string, stopNumber: st
 }
 
 /** Send to one lead. Enforces the lead-side state machine before any guard runs. */
-export async function sendSurveyToLead(leadId: string): Promise<SendOutcome> {
+export async function sendSurveyToLead(
+  leadId: string,
+  opts: { manual?: boolean } = {},
+): Promise<SendOutcome> {
+  const manual = opts.manual === true;
   const lead = await prisma.zillowLead.findUnique({ where: { id: leadId } });
   if (!lead) return { leadId, result: "skipped", detail: "not found" };
-  if (lead.status !== "new") return { leadId, result: "skipped", detail: `status is ${lead.status}` };
+  // The automation only texts fresh `new` leads. A MANUAL resend/retry from the
+  // dashboard bypasses that guard (resend to invited/failed/deferred) — but
+  // never to an opted-out lead.
+  if (lead.status === "opted_out") return { leadId, result: "skipped", detail: "opted out" };
+  if (!manual && lead.status !== "new") return { leadId, result: "skipped", detail: `status is ${lead.status}` };
   if (!lead.phone) return { leadId, result: "skipped", detail: "no phone" };
   if (!lead.propertyId) return { leadId, result: "skipped", detail: "no matched property" };
 
@@ -56,13 +64,22 @@ export async function sendSurveyToLead(leadId: string): Promise<SendOutcome> {
   const relayEnabled = (await resolveConfig("sms_relay", "enabled")) === "true";
 
   if (relayEnabled) {
-    const outcome = await relaySendWithGuards(lead.phone, text, { kind: "link", inviteId: invite.id });
+    const outcome = await relaySendWithGuards(lead.phone, text, { kind: "link", inviteId: invite.id, bypassCooldown: manual });
     if (outcome.status === "sent" || outcome.status === "deferred") {
+      // Deferred = a cap was hit; keep the human "retry after …" line visible on
+      // the lead so the operator sees why + when it will go. It auto-retries via
+      // the sweep, and the manual button can be pressed again after that time.
+      const capLine =
+        outcome.status === "deferred"
+          ? outcome.retryAfter
+            ? `${outcome.reason ?? "cap"} — retry after ${outcome.retryAfter.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+            : (outcome.reason ?? "queued")
+          : null;
       await prisma.zillowLead.update({
         where: { id: lead.id },
-        data: { status: "invited", inviteId: invite.id, sendError: null },
+        data: { status: "invited", inviteId: invite.id, sendError: capLine },
       });
-      return { leadId, result: outcome.status === "sent" ? "sent" : "deferred" };
+      return { leadId, result: outcome.status === "sent" ? "sent" : "deferred", detail: capLine ?? undefined };
     }
     if (outcome.status === "skipped" && outcome.reason === "opted out") {
       await prisma.zillowLead.update({ where: { id: lead.id }, data: { status: "opted_out", sendError: null } });
@@ -119,19 +136,20 @@ export async function sendSurveyBatch(
       status: "new",
       phone: { not: null },
       propertyId: opts.propertyId ? opts.propertyId : { not: null },
-      ...(opts.includeOlder ? {} : { OR: [{ firstContactAt: { gte: cutoff } }, { firstContactAt: null }] }),
+      // Eligibility boundary:
+      //  - "New leads only" (a baseline is set): a lead is auto-sendable only if
+      //    WE imported it after go-live — createdAt >= baseline, ALONE. createdAt
+      //    is set once and never touched by re-import, so leads already in the
+      //    list stay excluded forever. The firstContactAt (inquiry-date) age
+      //    window is deliberately NOT applied here — a genuinely-new lead with an
+      //    old inquiry must still be texted.
+      //  - No baseline + includeOlder: everything (explicit backlog blast).
+      //  - No baseline, no includeOlder: recent-inquiry window (legacy default).
       ...(since
-        ? {
-            AND: [
-              {
-                OR: [
-                  { firstContactAt: { gte: since } },
-                  { firstContactAt: null, createdAt: { gte: since } },
-                ],
-              },
-            ],
-          }
-        : {}),
+        ? { createdAt: { gte: since } }
+        : opts.includeOlder
+          ? {}
+          : { OR: [{ firstContactAt: { gte: cutoff } }, { firstContactAt: null }] }),
     },
     orderBy: { firstContactAt: "desc" },
   });

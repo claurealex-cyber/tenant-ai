@@ -445,7 +445,7 @@ export async function handleMediaStream(
                 });
                 const live = getCall(streamSid);
                 if (live && (res.status === "sent" || res.status === "already_sent")) live.linkSentAt = new Date();
-                if (res.status === "cannot_text") console.info(`[call-start link] not sent to ${callerPhone}: ${res.reason}`);
+                console.info(`[call-start link] ${callerPhone}: ${res.status}${res.status === "cannot_text" ? " — " + res.reason : ""}`);
               }
             } catch (err) {
               console.error("call-start link send failed:", err);

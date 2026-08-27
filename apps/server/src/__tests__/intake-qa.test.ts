@@ -63,6 +63,14 @@ describe("handleIntakeQa", () => {
     expect(res.replies[0]).toContain(LINK);
   });
 
+  it("every answer includes the link so the texter always re-receives it", async () => {
+    mockChat.mockResolvedValue({ content: "Yes, parking is included.", functionCalls: [] });
+    const p = phone();
+    await seedConv(p, [{ role: "user", content: "hi" }, { role: "assistant", content: `greeting ${LINK}` }, { role: "user", content: "q" }, { role: "assistant", content: "a" }]);
+    const res = await handleIntakeQa(ctx(p, "is there parking"));
+    expect(res.replies[0]).toContain(LINK);
+  });
+
   it("later answers do not repeat the STOP line", async () => {
     mockChat.mockResolvedValue({ content: "Yes, in-unit laundry.", functionCalls: [] });
     const p = phone();

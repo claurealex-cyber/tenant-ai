@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { resolveConfig } from "@tenant-ai/shared";
 import { runZillowExtraction, ZillowExtractError } from "./zillow-extract.js";
+import { withGuiLock } from "../lib/gui-lock.js";
 import path from "node:path";
 import os from "node:os";
 
@@ -145,7 +146,7 @@ export async function runZillowImport(): Promise<ImportSummary> {
 
     const run = await prisma.zillowImportRun.create({ data: { status: "running" } });
     try {
-      const extraction = await runZillowExtraction({ outDir: zillowOutDir() });
+      const extraction = await withGuiLock("zillow-safari-import", () => runZillowExtraction({ outDir: zillowOutDir() }));
       const summary = await ingestLeads(run.id, extraction.leads);
       await prisma.zillowImportRun.update({
         where: { id: run.id },

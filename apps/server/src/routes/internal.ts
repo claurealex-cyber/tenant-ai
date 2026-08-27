@@ -109,7 +109,7 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
       const ledger = inviteIds.length
         ? await prisma.outboundRelayMessage.findMany({
             where: { inviteId: { in: inviteIds } },
-            select: { inviteId: true, status: true, lastError: true, sentAt: true },
+            select: { inviteId: true, status: true, lastError: true, sentAt: true, body: true, kind: true },
           })
         : [];
       const ledgerByInvite = new Map(ledger.map((r) => [r.inviteId, r]));
@@ -134,11 +134,11 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
     },
   );
 
-  server.post<{ Params: { id: string } }>(
+  server.post<{ Params: { id: string }; Body: { manual?: boolean } }>(
     "/internal/zillow/leads/:id/send",
     { preHandler: requireInternalSecret },
     async (request, reply: FastifyReply) => {
-      const outcome = await sendSurveyToLead(request.params.id);
+      const outcome = await sendSurveyToLead(request.params.id, { manual: request.body?.manual === true });
       return reply.send(outcome);
     },
   );

@@ -2,6 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+/** Human cadence label: fixed 3×/day hours when configured, else the hourly window. */
+function cadenceLabel(runHours?: number[] | null, startHour?: number, endHour?: number): string {
+  if (runHours && runHours.length) {
+    const hrs = runHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(", ");
+    return `${runHours.length}×/day at ${hrs}`;
+  }
+  return `hourly from ${startHour ?? 8}:00 to ${endHour ?? 22}:00`;
+}
+
 interface AutoRun {
   day: string;
   status: string;
@@ -16,6 +25,10 @@ interface AutoRun {
 interface AutoStatus {
   enabled: boolean;
   autoHour: number;
+  startHour?: number;
+  endHour?: number;
+  runHours?: number[] | null;
+  nextRunLabel?: string | null;
   baseline: string | null;
   today: AutoRun | null;
   last30Days: AutoRun[];
@@ -43,7 +56,7 @@ function StatusChip({ status }: { status: string }) {
 export default function AutomationPanel({ newLeadCount }: { newLeadCount: number }) {
   const [status, setStatus] = useState<AutoStatus | null>(null);
   const [confirmOn, setConfirmOn] = useState(false);
-  const [baselineMode, setBaselineMode] = useState<"today" | "all">("today");
+  const [baselineMode, setBaselineMode] = useState<"new" | "all">("new");
   const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
   const [note, setNote] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -75,8 +88,8 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
         setNote({
           kind: "ok",
           text: enabled
-            ? "Automation is ON. The server picks the switch up within a minute; the daily window starts at " +
-              `${status?.autoHour ?? 9}:00.`
+            ? "Automation is ON. The server picks the switch up within a minute; it runs " +
+              `${cadenceLabel(status?.runHours, status?.startHour, status?.endHour)}.`
             : "Automation is OFF.",
         });
       } else {
@@ -147,8 +160,9 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
           <div>
             <h2 className="text-sm font-semibold text-gray-900">Daily automation</h2>
             <p className="mt-1 text-xs text-gray-500">
-              Imports new Zillow leads every day and texts each one the survey link (window opens
-              {" "}{status.autoHour}:00; paced ~3/hour, 25/day).
+              Imports new Zillow leads {cadenceLabel(status.runHours, status.startHour, status.endHour)}
+              {" "}and texts each NEW one the application link.
+              {status.enabled && status.nextRunLabel ? ` Next run: ${status.nextRunLabel}.` : ""}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -199,12 +213,14 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
               <label className="flex items-start gap-2">
                 <input
                   type="radio"
-                  checked={baselineMode === "today"}
-                  onChange={() => setBaselineMode("today")}
+                  checked={baselineMode === "new"}
+                  onChange={() => setBaselineMode("new")}
                   className="mt-0.5"
                 />
                 <span>
-                  <span className="font-medium">Only leads discovered from today on</span> (recommended)
+                  <span className="font-medium">Only new leads from now on</span> (recommended) — the{" "}
+                  <span className="font-medium">{newLeadCount} leads already in your list will NOT be messaged</span>.
+                  Only leads a future scrape adds get texted. (You can still text existing leads by hand.)
                 </span>
               </label>
               <label className="flex items-start gap-2">
@@ -215,9 +231,10 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
                   className="mt-0.5"
                 />
                 <span>
-                  Also queue the <span className="font-medium">{newLeadCount} existing new leads</span>{" "}
-                  (~{Math.max(1, Math.ceil(newLeadCount / 25))} days of paced sending; leads older
-                  than 60 days are skipped)
+                  <span className="font-medium">Include the existing backlog</span> — also text the{" "}
+                  <span className="font-medium">{newLeadCount} leads already in your list</span>{" "}
+                  (~{Math.max(1, Math.ceil(newLeadCount / 25))} days of paced sending). Use only if you
+                  want the current list contacted too.
                 </span>
               </label>
             </div>

@@ -34,7 +34,7 @@ export async function textLinkToCaller(opts: {
   const optedOut = await prisma.smsOptOut.findFirst({ where: { phone: callerPhone } });
   if (optedOut) return { status: "cannot_text", reason: "caller has opted out of texts" };
 
-  const { url } = await resolveSurveyLink(property, callerPhone);
+  const { url, invite } = await resolveSurveyLink(property, callerPhone);
   const text = buildIntakeReply({ name: property.name, intakeAutoReply: null }, url);
 
   const relayEnabled = (await resolveConfig("sms_relay", "enabled")) === "true";
@@ -42,7 +42,7 @@ export async function textLinkToCaller(opts: {
     const outcome = await relaySendWithGuards(
       callerPhone,
       rewriteForRelay(text, property.name, property.twilioPhone ?? property.name),
-      { kind: "link" },
+      { kind: "caller", inviteId: invite.id },
     );
     if (outcome.status === "sent" || outcome.status === "deferred") return { status: "sent" };
     if (outcome.status === "skipped" && outcome.reason === "cooldown") return { status: "already_sent" };

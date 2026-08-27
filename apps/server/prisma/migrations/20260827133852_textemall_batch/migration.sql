@@ -1,0 +1,16 @@
+ALTER TABLE "ZillowLead" ADD COLUMN IF NOT EXISTS "sentVia" TEXT;
+ALTER TABLE "ZillowLead" ADD COLUMN IF NOT EXISTS "sentBatchId" TEXT;
+CREATE TABLE IF NOT EXISTS "TextEmAllBatch" (
+  "id" TEXT NOT NULL,
+  "day" TEXT NOT NULL,
+  "groupName" TEXT NOT NULL,
+  "phones" JSONB NOT NULL,
+  "count" INTEGER NOT NULL DEFAULT 0,
+  "status" TEXT NOT NULL DEFAULT 'built',
+  "error" TEXT,
+  "csvPath" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "TextEmAllBatch_pkey" PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "TextEmAllBatch_day_key" ON "TextEmAllBatch"("day");

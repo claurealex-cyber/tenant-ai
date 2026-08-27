@@ -40,7 +40,7 @@ if (relayEnabled) {
   const outcome = await relaySendWithGuards(
     to,
     rewriteForRelay(reply, property.name, property.twilioPhone),
-    { kind: "link", inviteId: invite.id },
+    { kind: "intake", inviteId: invite.id },
   );
   console.log("relay outcome:", outcome);
 } else {

@@ -38,3 +38,6 @@ coverage/
 
 # Zillow runtime lead dumps (PII — never commit)
 .zillow/
+
+# Text-Em-All batch CSVs (lead PII — never commit)
+.textemall/

@@ -28,21 +28,40 @@ export async function POST(request: NextRequest) {
     if (typeof body.enabled !== "boolean") {
       return NextResponse.json({ error: "enabled (boolean) required" }, { status: 400 });
     }
-    const baselineMode = body.baselineMode === "all" ? "all" : "today";
+    // "new" (default): text only leads imported AFTER go-live. "all": include the
+    // existing backlog. resetBaseline forces the boundary to now on a re-enable.
+    const baselineMode = body.baselineMode === "all" ? "all" : "new";
+    const resetBaseline = body.resetBaseline === true;
+
+    const clampHour = (v: unknown, def: number) =>
+      Math.min(23, Math.max(0, parseInt(String(v), 10) || def));
 
     const writes: Array<{ key: string; value: string }> = [
       { key: "zillow.auto_enabled", value: body.enabled ? "true" : "false" },
     ];
+    // Optional hourly window (8am–10pm by default). Accepted on any call.
+    if (body.startHour !== undefined) {
+      writes.push({ key: "zillow.auto_start_hour", value: String(clampHour(body.startHour, 8)) });
+    }
+    if (body.endHour !== undefined) {
+      writes.push({ key: "zillow.auto_end_hour", value: String(clampHour(body.endHour, 22)) });
+    }
     if (body.enabled) {
-      const baseline =
-        baselineMode === "all"
-          ? new Date(0).toISOString()
-          : (() => {
-              const midnight = new Date();
-              midnight.setHours(0, 0, 0, 0);
-              return midnight.toISOString();
-            })();
-      writes.push({ key: "zillow.auto_baseline", value: baseline });
+      if (baselineMode === "all") {
+        // Explicit backlog blast: baseline = epoch (text everything, subject to caps).
+        writes.push({ key: "zillow.auto_baseline", value: new Date(0).toISOString() });
+      } else {
+        // New-leads-only. Set the boundary to NOW only on the FIRST enable (or an
+        // explicit reset) — preserve it on re-enable so a disable→re-enable never
+        // skips leads imported while it was off. This grandfathers the leads
+        // already in the list at go-live.
+        const { resolveConfig } = await import("@tenant-ai/shared");
+        const existing = (await resolveConfig("zillow", "auto_baseline"))?.trim();
+        const existingValid = existing && !isNaN(new Date(existing).getTime()) && existing !== new Date(0).toISOString();
+        if (!existingValid || resetBaseline) {
+          writes.push({ key: "zillow.auto_baseline", value: new Date().toISOString() });
+        }
+      }
     }
 
     for (const { key, value } of writes) {
@@ -59,7 +78,7 @@ export async function POST(request: NextRequest) {
         action: "zillow_automation_toggle",
         resourceType: "system_config",
         resourceId: "zillow.auto_enabled",
-        metadata: { enabled: body.enabled, baselineMode: body.enabled ? baselineMode : null },
+        metadata: { enabled: body.enabled, baselineMode: body.enabled ? baselineMode : null, resetBaseline },
       },
     });
 
