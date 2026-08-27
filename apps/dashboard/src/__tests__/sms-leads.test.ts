@@ -250,4 +250,42 @@ describe("getSmsLeads", () => {
     const { rows: applied } = await rowsForOurPhones({ state: "applied" });
     expect(applied.map((r) => r.phone)).toContain(P(6));
   });
+  it("a caller (kind 'caller' ledger row) gets origin 'called' + the caller message", async () => {
+    const phone = P(90);
+    const inv = await invite(phone, { channel: "google_form" });
+    await prisma.outboundRelayMessage.create({
+      data: { to: phone, kind: "caller", status: "sent", sentAt: new Date(), body: "Ghem (you called): apply here docs.google.com/forms/x", inviteId: inv.id } as any,
+    });
+    const { rows } = await rowsForOurPhones();
+    const row = rows.find((r) => r.phone === phone)!;
+    expect(row.origins).toContain("called");
+    expect(row.linkKind).toBe("google_form");
+    expect(row.callerMessage).toContain("you called");
+  });
+
+  it("a caller who LATER texted still shows 'called' (not overwritten by the newer text row)", async () => {
+    const phone = P(91);
+    const inv = await invite(phone, { channel: "google_form", inboundMessage: "hi" });
+    // caller send first, then a later intake text send (newer createdAt) on the SAME invite
+    await prisma.outboundRelayMessage.create({ data: { to: phone, kind: "caller", status: "sent", sentAt: new Date(Date.now() - 60000), createdAt: new Date(Date.now() - 60000), body: "call msg", inviteId: inv.id } as any });
+    await prisma.outboundRelayMessage.create({ data: { to: phone, kind: "intake", status: "sent", sentAt: new Date(), createdAt: new Date(), body: "text msg", inviteId: inv.id } as any });
+    const { rows } = await rowsForOurPhones();
+    const row = rows.find((r) => r.phone === phone)!;
+    expect(row.origins).toContain("called");   // rev.2a: full scan, not latest-row map
+    expect(row.origins).toContain("texted_in");
+    expect(row.callerMessage).toBe("call msg"); // rev.2b: caller row body, not the newer text
+  });
+
+  it("a text-only lead has NO 'called' origin, and the called count reflects callers", async () => {
+    const phone = P(92);
+    await invite(phone, { inboundMessage: "just texting" });
+    const { rows, counts } = await rowsForOurPhones();
+    const row = rows.find((r) => r.phone === phone)!;
+    expect(row.origins).not.toContain("called");
+    expect(counts.called).toBeGreaterThanOrEqual(1); // P(90)+P(91) called
+    // origin filter narrows to callers
+    const { rows: calledOnly } = await rowsForOurPhones({ origin: "called" });
+    expect(calledOnly.every((r) => r.origins.includes("called"))).toBe(true);
+    expect(calledOnly.find((r) => r.phone === phone)).toBeUndefined();
+  });
 });

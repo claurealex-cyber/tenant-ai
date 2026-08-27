@@ -46,7 +46,7 @@ describe("textLinkToCaller", () => {
     expect(res.status).toBe("sent");
     const sentText = String(mockRelay.mock.calls[0][1]);
     expect(sentText).toContain("docs.google.com/forms");
-    expect(mockRelay.mock.calls[0][2]).toMatchObject({ kind: "link" });
+    expect(mockRelay.mock.calls[0][2]).toMatchObject({ kind: "caller", inviteId: expect.any(String) });
   });
   it("refuses an anonymous / non-E.164 caller", async () => {
     const res = await textLinkToCaller({ property: prop(), callerPhone: "anonymous", source: "call_end" });

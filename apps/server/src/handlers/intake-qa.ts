@@ -103,15 +103,12 @@ export async function handleIntakeQa(ctx: IntakeQaContext): Promise<SmsResult> {
   }
 
   // Assemble suffixes FIRST, then truncate the answer to what's left, so the
-  // whole thing is exactly one SMS (<= SMS_MAX_CHARS). STOP line and nudge are
-  // never chopped by truncation.
-  const historyHasLink = assistantMsgs.some((m) => /https?:\/\//.test(m.content));
-  const wantsApply = /\bapply\b|\bapplication\b/i.test(inbound);
-  const nudge =
-    (!historyHasLink && priorAssistant === 0) || wantsApply || (priorAssistant > 0 && priorAssistant % 3 === 0);
-
+  // whole thing is exactly one SMS (<= SMS_MAX_CHARS). STOP line and link are
+  // never chopped by truncation. The application link is ALWAYS appended (owner
+  // requirement: anyone who texts re-receives it, even if they already got it),
+  // unless the model already included it in the answer.
   const stopSuffix = priorAssistant === 0 ? "\nText STOP to opt out." : "";
-  const nudgeSuffix = nudge && !answer.includes(ctx.link) ? ` You can apply here: ${ctx.link}` : "";
+  const nudgeSuffix = answer.includes(ctx.link) ? "" : ` Apply here: ${ctx.link}`;
   const reserved = stopSuffix.length + nudgeSuffix.length;
 
   const body = toSingleSms(answer, Math.max(80, SMS_MAX_CHARS - reserved));

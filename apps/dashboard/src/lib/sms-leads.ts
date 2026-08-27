@@ -12,7 +12,7 @@ import { prisma } from "@/lib/prisma";
  * snapshot (or ZillowLead.lastMessage for blast recipients).
  */
 
-export type SmsLeadOrigin = "texted_in" | "zillow";
+export type SmsLeadOrigin = "texted_in" | "zillow" | "called";
 export type SmsLeadLinkKind = "google_form" | "hosted" | "none";
 export type SmsLeadState = "applied" | "opted_out" | "invited" | "contacted";
 
@@ -31,6 +31,8 @@ export interface SmsLeadRow {
   inboundMessage: string | null;
   /** live transcript — null once the 24h SmsConversation purge has run */
   transcript: Array<{ role: string; content: string }> | null;
+  /** the exact text sent on a CALL (kind "caller" ledger body), for the tooltip */
+  callerMessage: string | null;
 }
 
 export interface SmsLeadFilters {
@@ -48,6 +50,7 @@ export interface SmsLeadsResult {
     total: number;
     textedIn: number;
     zillow: number;
+    called: number;
     googleForm: number;
     hosted: number;
     applied: number;
@@ -97,12 +100,23 @@ export async function getSmsLeads(filters: SmsLeadFilters = {}): Promise<SmsLead
     ? await prisma.outboundRelayMessage.findMany({
         where: { inviteId: { in: inviteIds } },
         orderBy: { createdAt: "desc" },
-        select: { inviteId: true, status: true, sentAt: true, lastError: true },
+        select: { inviteId: true, status: true, sentAt: true, lastError: true, kind: true, body: true },
       })
     : [];
   const latestLedgerByInvite = new Map<string, (typeof ledger)[number]>();
   for (const row of ledger) {
     if (row.inviteId && !latestLedgerByInvite.has(row.inviteId)) latestLedgerByInvite.set(row.inviteId, row);
+  }
+  // "Called" is derived from a FULL scan of kind="caller" rows — NOT the latest
+  // map above, which a later text would overwrite (rev. 2a). The caller message
+  // body comes from the caller row specifically (rev. 2b).
+  const calledInviteIds = new Set<string>();
+  const callerRowByInvite = new Map<string, (typeof ledger)[number]>();
+  for (const row of ledger) {
+    if (row.inviteId && row.kind === "caller") {
+      calledInviteIds.add(row.inviteId);
+      if (!callerRowByInvite.has(row.inviteId)) callerRowByInvite.set(row.inviteId, row);
+    }
   }
 
   interface Acc {
@@ -161,6 +175,8 @@ export async function getSmsLeads(filters: SmsLeadFilters = {}): Promise<SmsLead
       entry.conversation !== null;
     if (textedIn) origins.push("texted_in");
     if (zillowLead) origins.push("zillow");
+    const calledInvite = entry.invites.find((i) => calledInviteIds.has(i.id));
+    if (calledInvite) origins.push("called");
 
     const linkKind: SmsLeadLinkKind = latestInvite
       ? latestInvite.channel === "google_form"
@@ -202,6 +218,7 @@ export async function getSmsLeads(filters: SmsLeadFilters = {}): Promise<SmsLead
         : null,
       state,
       isTenant: tenantKeys.has(`${entry.phone}|${entry.userId}`),
+      callerMessage: calledInvite ? (callerRowByInvite.get(calledInvite.id)?.body ?? null) : null,
       inboundMessage:
         entry.invites.find((i) => i.inboundMessage)?.inboundMessage ?? zillowLead?.lastMessage ?? lastUserLine,
       transcript,
@@ -215,6 +232,7 @@ export async function getSmsLeads(filters: SmsLeadFilters = {}): Promise<SmsLead
     total: rows.filter((r) => !r.isTenant).length,
     textedIn: rows.filter((r) => !r.isTenant && r.origins.includes("texted_in")).length,
     zillow: rows.filter((r) => !r.isTenant && r.origins.includes("zillow")).length,
+    called: rows.filter((r) => !r.isTenant && r.origins.includes("called")).length,
     googleForm: rows.filter((r) => !r.isTenant && r.linkKind === "google_form").length,
     hosted: rows.filter((r) => !r.isTenant && r.linkKind === "hosted").length,
     applied: rows.filter((r) => !r.isTenant && r.state === "applied").length,

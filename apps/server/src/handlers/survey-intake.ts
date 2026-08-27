@@ -163,26 +163,9 @@ export async function handleSurveyIntake(
   callerPhone: string,
   inboundMessage?: string,
 ): Promise<SmsResult> {
-  // Completed application on file? Acknowledge, don't re-link.
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000);
-  const completed = await prisma.application.findFirst({
-    where: {
-      propertyId: property.id,
-      callerPhone,
-      channel: "sms_link",
-      status: { in: ["completed", "reviewed"] },
-      completedAt: { gt: thirtyDaysAgo },
-    },
-  });
-  if (completed) {
-    return {
-      replies: [
-        `We received your application for ${property.name} and will be in touch soon. Reply STOP to opt out.`,
-      ],
-      shouldRespond: true,
-      replyKind: "confirmation",
-    };
-  }
+  // NOTE: the previous "completed application on file → acknowledge, don't
+  // re-link" gate was removed by owner request — a prospect who texts should
+  // always get the intro + application link, even if they applied before.
 
   // Style decision (Link only vs Link + Q&A). Read THIS process's config.
   const intake = await resolveIntakeStyle(resolveConfig);

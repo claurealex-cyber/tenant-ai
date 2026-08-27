@@ -11,6 +11,7 @@ interface SmsLeadRow {
   firstContactAt: string | null;
   origins: string[];
   linkKind: string;
+  callerMessage?: string | null;
   delivery: { status: string; sentAt: string | null; lastError: string | null } | null;
   state: string;
   isTenant: boolean;
@@ -22,6 +23,7 @@ interface Counts {
   total: number;
   textedIn: number;
   zillow: number;
+  called: number;
   googleForm: number;
   hosted: number;
   applied: number;
@@ -33,7 +35,7 @@ const PAGE_SIZE = 50;
 
 const LINK_LABEL: Record<string, string> = {
   google_form: "Google Form",
-  hosted: "Hosted survey",
+  hosted: "Hosted survey (ngrok)",
   none: "none yet",
 };
 const LINK_STYLE: Record<string, string> = {
@@ -59,9 +61,11 @@ export default function SmsLeadsPage() {
   const [includeTenants, setIncludeTenants] = useState(false);
   const [page, setPage] = useState(0);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [pollPaused, setPollPaused] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const params = new URLSearchParams();
       if (origin) params.set("origin", origin);
@@ -74,16 +78,42 @@ export default function SmsLeadsPage() {
       setRows(data.rows || []);
       setCounts(data.counts || null);
       setError("");
+      setLastRefreshed(new Date());
+      return true;
     } catch {
       setError("Failed to load SMS leads");
+      return false;
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [origin, linkKind, state, includeTenants]);
 
   useEffect(() => {
     setPage(0);
     load();
+  }, [load]);
+
+  // Visibility-gated auto-refresh (~2 min). SMS-leads payload is tiny; still
+  // pause when hidden and stop after repeated failures to respect the ngrok
+  // Free quota. Silent (no spinner) so the table doesn't flash.
+  useEffect(() => {
+    let stopped = false, failures = 0;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const tick = async () => {
+      if (stopped) return;
+      const ok = await load(true);
+      failures = ok ? 0 : failures + 1;
+      if (failures >= 3) { stopped = true; setPollPaused(true); if (interval) clearInterval(interval); }
+    };
+    const start = () => { if (!interval && !stopped) interval = setInterval(tick, 120_000); };
+    const stop = () => { if (interval) clearInterval(interval); interval = null; };
+    const onVis = () => {
+      if (document.visibilityState === "visible") { if (!stopped) { tick(); start(); } }
+      else stop();
+    };
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVis);
+    return () => { stopped = true; stop(); document.removeEventListener("visibilitychange", onVis); };
   }, [load]);
 
   const pageRows = useMemo(() => rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE), [rows, page]);
@@ -102,12 +132,18 @@ export default function SmsLeadsPage() {
 
         {error && <div className="mb-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
 
+        <div className="mb-2 flex items-center gap-3 text-xs text-gray-500">
+          {lastRefreshed && <span>updated {lastRefreshed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>}
+          {pollPaused && <span className="text-amber-600">· auto-refresh paused (reload to resume)</span>}
+          <button onClick={() => load()} className="text-blue-600 hover:underline">refresh now</button>
+        </div>
         {counts && (
           <div className="mb-4 rounded-lg border border-gray-200 bg-white p-6">
             <dl className="grid grid-cols-3 gap-4 sm:grid-cols-7">
               {[
                 ["Leads", counts.total],
                 ["Texted in", counts.textedIn],
+                ["Called + texted link", counts.called],
                 ["From Zillow", counts.zillow],
                 ["Got Google Form", counts.googleForm],
                 ["Got hosted survey", counts.hosted],
@@ -127,12 +163,13 @@ export default function SmsLeadsPage() {
           <select value={origin} onChange={(e) => setOrigin(e.target.value)} className="rounded-md border border-gray-300 px-2 py-1.5">
             <option value="">All origins</option>
             <option value="texted_in">Texted in</option>
+            <option value="called">Called</option>
             <option value="zillow">Zillow</option>
           </select>
           <select value={linkKind} onChange={(e) => setLinkKind(e.target.value)} className="rounded-md border border-gray-300 px-2 py-1.5">
             <option value="">All link kinds</option>
             <option value="google_form">Google Form</option>
-            <option value="hosted">Hosted survey</option>
+            <option value="hosted">Hosted survey (ngrok)</option>
             <option value="none">No link yet</option>
           </select>
           <select value={state} onChange={(e) => setState(e.target.value)} className="rounded-md border border-gray-300 px-2 py-1.5">
@@ -191,8 +228,13 @@ export default function SmsLeadsPage() {
                         </td>
                         <td className="px-4 py-3">
                           {row.origins.map((o) => (
-                            <span key={o} className="mr-1 inline-block rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
-                              {o === "texted_in" ? "texted in" : "Zillow"}
+                            <span
+                              key={o}
+                              className={`mr-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${
+                                o === "called" ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"
+                              }`}
+                            >
+                              {o === "texted_in" ? "texted in" : o === "called" ? "📞 called" : "Zillow"}
                             </span>
                           ))}
                         </td>
@@ -200,6 +242,11 @@ export default function SmsLeadsPage() {
                           <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${LINK_STYLE[row.linkKind] ?? ""}`}>
                             {LINK_LABEL[row.linkKind] ?? row.linkKind}
                           </span>
+                          {row.callerMessage && (
+                            <span className="ml-1 cursor-help text-blue-500" title={row.callerMessage}>
+                              ⓘ
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-600">
                           {row.delivery

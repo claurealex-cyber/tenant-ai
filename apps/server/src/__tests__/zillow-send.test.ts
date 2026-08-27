@@ -27,6 +27,7 @@ vi.mock("@tenant-ai/shared", async (importOriginal) => {
         if (key === "enabled") return "true";
         if (key === "hourly_cap") return "10000";
         if (key === "daily_cap") return "10000";
+        if (key === "new_recipient_cap") return "10000";
         if (key === "cooldown_minutes") return "60";
         if (key === "survey_base_url") return "https://test-tunnel.example.com";
         if (key === "survey_mode") return surveyCfg.mode;
@@ -246,20 +247,77 @@ describe("sendSurveyBatch", () => {
     expect(wider.outcomes.map((o) => o.leadId)).toContain(old.id);
   });
 
-  it("sinceDate (automation baseline) excludes leads discovered before it", async () => {
+  it("baseline is IMPORT time (createdAt), not inquiry date: existing excluded, new-with-old-inquiry included", async () => {
     const baseline = new Date(Date.now() - 2 * 86_400_000);
-    const before = await makeLead({ firstContactAt: new Date(Date.now() - 5 * 86_400_000) });
-    const after = await makeLead({ firstContactAt: new Date(Date.now() - 86_400_000) });
-    // undated lead: falls back to createdAt (now — after the baseline)
-    const undated = await makeLead({ firstContactAt: null });
+    // Existing lead: imported BEFORE go-live (createdAt old) but a RECENT inquiry → EXCLUDED.
+    const existing = await makeLead({ createdAt: new Date(Date.now() - 5 * 86_400_000), firstContactAt: new Date() });
+    // New lead: imported AFTER go-live (createdAt = now) with an OLD inquiry (90d) → INCLUDED
+    // (the firstContactAt age window must NOT drop it in new-only mode).
+    const newOldInquiry = await makeLead({ firstContactAt: new Date(Date.now() - 90 * 86_400_000) });
 
     const result = await sendSurveyBatch({ propertyId, sinceDate: baseline });
     const ids = result.outcomes.map((o) => o.leadId);
-    expect(ids).toContain(after.id);
-    expect(ids).toContain(undated.id);
-    expect(ids).not.toContain(before.id);
+    expect(ids).not.toContain(existing.id);       // existing: createdAt < baseline
+    expect(ids).toContain(newOldInquiry.id);       // new: createdAt >= baseline, old inquiry OK
 
-    const beforeRow = await prisma.zillowLead.findUnique({ where: { id: before.id } });
-    expect(beforeRow!.status).toBe("new"); // untouched, still manually sendable
+    const existingRow = await prisma.zillowLead.findUnique({ where: { id: existing.id } });
+    expect(existingRow!.status).toBe("new"); // untouched, still manually sendable
+  });
+
+  it("a re-import (update, never touches createdAt) keeps an existing lead excluded across scrapes", async () => {
+    const baseline = new Date(Date.now() - 2 * 86_400_000);
+    const created = await makeLead({ createdAt: new Date(Date.now() - 5 * 86_400_000), firstContactAt: new Date(Date.now() - 10 * 86_400_000) });
+    const originalCreatedAt = created.createdAt.getTime();
+    // Simulate the hourly re-scrape: ingestLeads UPDATES fields but not createdAt.
+    await prisma.zillowLead.update({ where: { id: created.id }, data: { firstContactAt: new Date(), zillowStatus: "re-scraped" } });
+    const existing = await prisma.zillowLead.findUnique({ where: { id: created.id } });
+    expect(existing!.createdAt.getTime()).toBe(originalCreatedAt); // createdAt NOT bumped by the update
+    expect(existing!.createdAt.getTime()).toBeLessThan(baseline.getTime()); // still before go-live
+    const result = await sendSurveyBatch({ propertyId, sinceDate: baseline });
+    expect(result.outcomes.map((o) => o.leadId)).not.toContain(existing!.id); // still excluded
+  });
+});
+
+describe("sendSurveyToLead manual resend/retry", () => {
+  it("manual resends to an already-invited lead (bypasses the status guard)", async () => {
+    const lead = await makeLead();
+    const first = await sendSurveyToLead(lead.id);
+    expect(first.result).toBe("sent");
+    const invited = await prisma.zillowLead.findUnique({ where: { id: lead.id } });
+    expect(invited!.status).toBe("invited");
+    // Non-manual re-send is blocked by the status guard:
+    const auto = await sendSurveyToLead(lead.id);
+    expect(auto.result).toBe("skipped");
+    expect(auto.detail).toContain("status is invited");
+    // Manual re-send goes through:
+    mockSend.mockClear();
+    const manual = await sendSurveyToLead(lead.id, { manual: true });
+    expect(manual.result).toBe("sent");
+    expect(mockSend).toHaveBeenCalled();
+  });
+
+  it("manual retry of a failed lead sends", async () => {
+    const lead = await makeLead();
+    await prisma.zillowLead.update({ where: { id: lead.id }, data: { status: "invited", sendError: "cooldown" } });
+    const retry = await sendSurveyToLead(lead.id, { manual: true });
+    expect(retry.result).toBe("sent");
+  });
+
+  it("never manually sends to an opted-out lead", async () => {
+    const lead = await makeLead();
+    await prisma.zillowLead.update({ where: { id: lead.id }, data: { status: "opted_out" } });
+    const res = await sendSurveyToLead(lead.id, { manual: true });
+    expect(res.result).toBe("skipped");
+    expect(res.detail).toBe("opted out");
+  });
+
+  it("the batch stays status-guarded (manual defaults off)", async () => {
+    const lead = await makeLead();
+    await sendSurveyToLead(lead.id); // → invited
+    // sendSurveyBatch calls sendSurveyToLead WITHOUT manual → invited lead skipped
+    const before = await prisma.zillowLead.findUnique({ where: { id: lead.id } });
+    expect(before!.status).toBe("invited");
+    const again = await sendSurveyToLead(lead.id); // simulate batch path
+    expect(again.result).toBe("skipped");
   });
 });

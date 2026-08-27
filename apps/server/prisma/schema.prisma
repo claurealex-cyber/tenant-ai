@@ -676,6 +676,8 @@ model ZillowLead {
   zillowStatus   String?
   lastMessage    String?
   status         String    @default("new") // new | invited | applied | opted_out | no_phone
+  sentVia        String?   // which channel sent the link: relay | textemall (null = legacy relay)
+  sentBatchId    String?   // TextEmAllBatch.id when sentVia = textemall
   inviteId       String?
   sendError      String?
   importRunId    String
@@ -690,9 +692,24 @@ model ZillowLead {
 
 // ──────────────── Zillow Daily Automation ────────────────
 
+model TextEmAllBatch {
+  id        String   @id @default(cuid())
+  day       String   // local calendar day — kept for grouping/reporting (no longer unique)
+  slot      String?  @unique // "2026-08-27T16" server-local hour — per-slot broadcast idempotence key (3×/day)
+  groupName String   // the standing Text-Em-All group this batch targets
+  phones    Json     // string[] of E.164 numbers in this batch (the "who was pushed" record)
+  count     Int      @default(0)
+  status    String   @default("built") // built | uploaded | sent | failed
+  error     String?
+  csvPath   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model ZillowAutoRun {
   id            String    @id @default(cuid())
-  day           String    @unique // "2026-08-27" server-local — the idempotence key
+  day           String    // "2026-08-27" server-local — calendar day for grouping/display
+  slot          String?   @unique // "2026-08-27T14" server-local hour — the idempotence key (hourly runs)
   status        String    @default("running") // running | done | needs_login | failed
   attempts      Int       @default(0)
   leadsFound    Int       @default(0) // latest import's total
