@@ -3,7 +3,7 @@ import { resolveConfig } from "@tenant-ai/shared";
 import { runZillowImport } from "./zillow-import.js";
 import { sendSurveyBatch } from "./zillow-send.js";
 import { buildTextEmAllCsv } from "./textemall-csv.js";
-import { irisUploadToGroup } from "./textemall-iris.js";
+import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
 import { fireTextEmAllTrigger } from "./textemall-trigger.js";
 import { withGuiLock } from "../lib/gui-lock.js";
 
@@ -268,21 +268,25 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
         return { outcome: "ran", run: toRunSummary(row) };
       }
       const group = (await resolveConfig("zillow", "textemall_group")) ?? "Ghem leads";
+      const groupUrl = (await resolveConfig("zillow", "textemall_group_url")) ?? undefined;
       const batchRow = await prisma.textEmAllBatch.upsert({
         where: { slot: broadcastSlot },
         create: { slot: broadcastSlot, day, groupName: group, phones: csv.phones, count: csv.count, status: "built", csvPath: csv.csvPath },
         update: { phones: csv.phones, count: csv.count, status: "built", csvPath: csv.csvPath, error: null },
       });
 
-      // Strict order (§2d #5, rev.3 C): GUI-locked Iris upload → verify → fire
-      // trigger → stamp batch SENT before flipping leads. Any failure BEFORE the
-      // trigger flips NO leads and records the batch failure.
-      const upload = await withGuiLock("textemall-iris-upload", () =>
-        irisUploadToGroup({ csvPath: csv.csvPath!, group, expectedCount: csv.count }),
-      );
+      // Strict order (§2d #5, rev.3 C): GUI-locked group-set → verify → fire
+      // trigger → stamp batch SENT before flipping leads. DETERMINISTIC path —
+      // sets the group via the Text-Em-All REST API (authenticated XHR in the
+      // logged-in Safari tab), NOT the fragile iris GUI drive. Seconds, not minutes.
+      const groupId = groupIdFromUrl(groupUrl);
+      const upload = groupId
+        ? await withGuiLock("textemall-api", () => setGroupViaApi({ groupId, phones: csv.phones }))
+        : ({ status: "failed", detail: "no textemall_group_url configured" } as const);
       if (upload.status !== "ok") {
-        await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: upload.status === "needs_login" ? "failed" : "failed", error: `iris upload ${upload.status}${upload.status === "failed" ? ": " + upload.detail : ""}`.slice(0, 500) } });
-        const row = await finishRow(claim, upload.status === "needs_login" ? "needs_login" : "failed", { error: `textemall upload ${upload.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+        const detail = upload.status === "needs_login" ? "needs-login" : (upload as { detail?: string }).detail ?? "failed";
+        await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "failed", error: `group-set ${upload.status}: ${detail}`.slice(0, 500) } });
+        const row = await finishRow(claim, upload.status === "needs_login" ? "needs_login" : "failed", { error: `textemall ${upload.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
         return { outcome: upload.status === "needs_login" ? "needs_login" : "failed", run: toRunSummary(row) };
       }
 

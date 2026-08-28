@@ -7,6 +7,7 @@ const cfg: Record<string, string> = {
   "textemall.individual_cooldown_min": "60",
   "textemall.individual_settle_sec": "0",
   "textemall.monthly_fire_cap": "100",
+  "textemall.individual_group_url": "https://app.text-em-all.com/contacts/group/1300",
 };
 vi.mock("@tenant-ai/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tenant-ai/shared")>();
@@ -21,7 +22,7 @@ vi.mock("../routes/telnyx-sms.js", () => ({ rewriteForRelay: (t: string) => t })
 import { runIndividualRelay, individualTextEmAllEligible } from "../services/individual-relay.js";
 const prisma = new PrismaClient();
 
-const okEdit = vi.fn(async () => ({ status: "ok" as const }));
+const okEdit = vi.fn(async () => ({ status: "ok" as const, count: 1, phones: ["+13125550199"] }));
 const fireOk = vi.fn(async () => ({ fired: true as const, status: 200 }));
 const relayOk = vi.fn(async () => ({ status: "sent" as const }));
 

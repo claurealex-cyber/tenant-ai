@@ -12,11 +12,13 @@ const IRIS_TIMEOUT_MS = Number(process.env.IRIS_TIMEOUT_MS) || 40 * 60_000;
  * using **Add Contact** (typing the number) — NOT the CSV file-import (R3). This
  * avoids the fragile macOS file picker entirely and is far fewer turns.
  */
-export function buildSetGroupToNumberGoal(opts: { group: string; phone: string }): string {
+export function buildSetGroupToNumberGoal(opts: { group: string; phone: string; groupUrl?: string }): string {
   return [
     "You are driving the Mac GUI (Safari) in Text-Em-All. The app is already open. Do EXACTLY these steps and nothing else — do NOT click Create Broadcast/Send or message anyone.",
     "1. Make sure Safari is on https://app.text-em-all.com . If you see a sign-in / login screen, STOP and make your FINAL line exactly: RESULT: needs-login",
-    `2. Open the group named exactly "${opts.group}" (Contacts → click it). Do NOT open any other group (e.g. "Everyone" or the Zillow group).`,
+    opts.groupUrl
+      ? `2. Navigate Safari DIRECTLY to this exact URL (type it in the address bar) so you land on the right group without hunting the sidebar: ${opts.groupUrl} . This IS the group "${opts.group}". If you see a sign-in screen, STOP and print exactly: RESULT: needs-login. Do NOT open any other group.`
+      : `2. Open the group named exactly "${opts.group}" (Contacts → click it). Do NOT open any other group (e.g. "Everyone" or the Zillow group).`,
     "3. If the group has any contacts, remove them one by one (click a contact → More Actions → Remove From Group → confirm) until it shows 0. There is no select-all — do not look for one.",
     `4. Click "Add Contact" and add a single contact with the phone number ${opts.phone} (type it into the phone field; a name is optional). Save/confirm.`,
     "5. Read the group's contact count and IMMEDIATELY print: RESULT: count=<N> (the exact integer shown).",
@@ -31,7 +33,7 @@ export function buildSetGroupToNumberGoal(opts: { group: string; phone: string }
  * `deps.run` injectable for tests.
  */
 export async function irisSetGroupToNumber(
-  opts: { group: string; phone: string; timeoutMs?: number },
+  opts: { group: string; phone: string; groupUrl?: string; timeoutMs?: number },
   deps: { run?: (goal: string) => Promise<string> } = {},
 ): Promise<IrisUploadResult> {
   const goal = buildSetGroupToNumberGoal(opts);

@@ -31,13 +31,16 @@ const IRIS_TIMEOUT_MS = Number(process.env.IRIS_TIMEOUT_MS) || 40 * 60_000;
  *    is detectable from a verified count even if the final marker is never reached
  *    (see parseIrisResult). Import is the priority — do not linger on the clear.
  */
-export function buildIrisUploadGoal(opts: { csvPath: string; group: string; expectedCount: number }): string {
+export function buildIrisUploadGoal(opts: { csvPath: string; group: string; expectedCount: number; groupUrl?: string }): string {
+  const openStep = opts.groupUrl
+    ? `2. Navigate Safari DIRECTLY to this exact URL (type it in the address bar / set the tab URL) so you land on the right group without hunting the sidebar: ${opts.groupUrl} . This IS the group "${opts.group}". If instead you see a sign-in screen, STOP and print exactly: RESULT: needs-login. Do NOT open any other group.`
+    : `2. Open the group named exactly "${opts.group}" (Contacts → click it in the group list, or it may already be open). Do NOT open any other group such as "Everyone" or "Unfiled" — work ONLY in "${opts.group}".`;
   return [
     "You are driving the Mac GUI (Safari) to load contacts into Text-Em-All. The app is already open. Do EXACTLY these steps and nothing else — do NOT click Create Broadcast, Send, or anything that messages people. The IMPORT is the priority; do not spend the whole session on the delete step.",
     "1. Make sure Safari is on https://app.text-em-all.com . If you see a sign-in / login screen (email + password, not the app), STOP and make your FINAL line exactly: RESULT: needs-login",
-    `2. Open the group named exactly "${opts.group}" (Contacts → click it in the group list, or it may already be open). Do NOT open any other group such as "Everyone" or "Unfiled" — work ONLY in "${opts.group}".`,
+    openStep,
     "3. Read how many contacts the group currently has. If it is already 0 (empty / 'This group is empty'), skip straight to step 5.",
-    "4. Otherwise remove the contacts one by one: click a contact → 'More Actions' → 'Remove From Group' → confirm; you return to the group. Repeat for each remaining contact until the group shows 0. (There is no select-all here — do not look for one.) When empty, print: RESULT: cleared",
+    "4. Otherwise remove EVERY contact one by one: click a contact → 'More Actions' → 'Remove From Group' → confirm; you return to the group. Repeat for EACH remaining contact. IMPORTANT: after you think it's empty, re-read the count — it MUST show 0 / 'This group is empty' before you go on. If ANY contact remains (even one), keep removing until the count is truly 0. Do NOT import while any contact is still there. (There is no select-all — do not look for one.) When the count is confirmed 0, print: RESULT: cleared",
     `5. Import the CSV into this SAME group: click 'Upload File'. In the macOS Open dialog press Command-Shift-G, type this exact path: ${opts.csvPath} , press Return, then double-click the file (or Open).`,
     "6. On the column-mapping / preview screen, map the columns to Name and Phone, then click Import to finish INTO this same group.",
     `7. Wait briefly for the count to settle, then READ the group's contact count and IMMEDIATELY print a line of the form: RESULT: count=<N>  (where <N> is the exact integer shown). Print this the instant you read it, before anything else.`,
@@ -81,7 +84,7 @@ export function parseIrisResult(output: string, expectedCount?: number): IrisUpl
  * recorded status. `deps.run` is injectable for tests.
  */
 export async function irisUploadToGroup(
-  opts: { csvPath: string; group: string; expectedCount: number; timeoutMs?: number },
+  opts: { csvPath: string; group: string; expectedCount: number; groupUrl?: string; timeoutMs?: number },
   deps: { run?: (goal: string) => Promise<string> } = {},
 ): Promise<IrisUploadResult> {
   const goal = buildIrisUploadGoal(opts);

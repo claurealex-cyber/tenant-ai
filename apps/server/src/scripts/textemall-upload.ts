@@ -4,7 +4,7 @@ import { buildIrisUploadGoal, parseIrisResult } from "../services/textemall-iris
 const csvPath = process.argv[2];
 const group = process.argv[3] || "1. Leads 08/27/2026";
 const expectedCount = parseInt(process.argv[4] || "2", 10);
-const goal = buildIrisUploadGoal({ csvPath, group, expectedCount });
+const goal = buildIrisUploadGoal({ csvPath, group, expectedCount, groupUrl: process.env.TEA_GROUP_URL });
 
 console.log(`[upload] group="${group}" csv=${csvPath} expect=${expectedCount}`);
 const iris = process.env.IRIS_BIN || "iris";

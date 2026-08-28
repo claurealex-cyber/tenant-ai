@@ -4,7 +4,7 @@ import { withGuiLock } from "../lib/gui-lock.js";
 import { resolveSurveyLink, buildIntakeReply } from "../handlers/survey-intake.js";
 import { relaySendWithGuards } from "./relay-guards.js";
 import { rewriteForRelay } from "../routes/telnyx-sms.js";
-import { irisSetGroupToNumber } from "./individual-iris.js";
+import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
 import { fireIndividualTrigger } from "./individual-trigger.js";
 import { claimFire } from "./fire-ledger.js";
 
@@ -58,13 +58,13 @@ export async function runIndividualRelay(
   data: IndividualRelayJobData,
   deps: {
     now?: Date;
-    setGroup?: typeof irisSetGroupToNumber;
+    setGroup?: typeof setGroupViaApi;
     fire?: typeof fireIndividualTrigger;
     relay?: typeof relaySendWithGuards;
   } = {},
 ): Promise<IndividualRelayOutcome> {
   const now = deps.now ?? new Date();
-  const setGroup = deps.setGroup ?? irisSetGroupToNumber;
+  const setGroup = deps.setGroup ?? setGroupViaApi;
   const fire = deps.fire ?? fireIndividualTrigger;
   const relay = deps.relay ?? relaySendWithGuards;
   const phone = data.callerPhone;
@@ -82,6 +82,8 @@ export async function runIndividualRelay(
   if (await firedRecently(phone, now)) return { via: "skipped", reason: "cooldown" };
 
   const group = (await resolveConfig("textemall", "individual_group")) ?? "2. leads 08-28-2026";
+  const groupUrl = (await resolveConfig("textemall", "individual_group_url")) ?? undefined;
+  const groupId = groupIdFromUrl(groupUrl);
   const { url, invite } = await resolveSurveyLink(property, phone);
   const text = buildIntakeReply({ name: property.name, intakeAutoReply: null }, url);
   const relayText = rewriteForRelay(text, property.name, property.twilioPhone ?? property.name);
@@ -91,8 +93,9 @@ export async function runIndividualRelay(
   };
 
   // Attempt Text-Em-All: GUI-locked group edit → verify → cap → fire.
-  const edit = await withGuiLock("individual-relay", () => setGroup({ group, phone }));
-  if (edit.status !== "ok") return doRelay(`iris ${edit.status}`);
+  if (!groupId) return doRelay("no individual_group_url configured");
+  const edit = await withGuiLock("individual-relay", () => setGroup({ groupId, phones: [phone] }));
+  if (edit.status !== "ok") return doRelay(`group-set ${edit.status}`);
 
   const claim = await claimFire("individual", { ref: phone, now });
   if (!claim.allowed) return doRelay(`monthly cap ${claim.count}/${claim.cap}`);
