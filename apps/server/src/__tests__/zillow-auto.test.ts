@@ -30,6 +30,7 @@ vi.mock("@tenant-ai/shared", async (importOriginal) => {
       if (ns === "zillow" && key === "send_channel") return cfg.channel;
       if (ns === "zillow" && key === "textemall_broadcast_hour") return cfg.broadcastHour;
       if (ns === "zillow" && key === "textemall_group") return "GATE grp";
+      if (ns === "zillow" && key === "textemall_group_url") return "https://app.text-em-all.com/contacts/group/1271";
       if (ns === "zillow" && key === "auto_run_hours") return cfg.runHours;
       if (ns === "textemall" && key === "monthly_fire_cap") return cfg.monthlyCap;
       return original.resolveConfig(ns, key);
@@ -54,7 +55,7 @@ vi.mock("../services/textemall-csv.js", () => ({
   buildTextEmAllCsv: (...a: unknown[]) => mockCsv(...a),
 }));
 const mockIris = vi.fn();
-vi.mock("../services/textemall-iris.js", () => ({ irisUploadToGroup: (...a: unknown[]) => mockIris(...a) }));
+vi.mock("../services/textemall-api.js", () => ({ setGroupViaApi: (...a: unknown[]) => mockIris(...a), groupIdFromUrl: (u: string | null) => (u ? "1271" : null) }));
 const mockTrigger = vi.fn();
 vi.mock("../services/textemall-trigger.js", () => ({ fireTextEmAllTrigger: (...a: unknown[]) => mockTrigger(...a) }));
 
@@ -101,7 +102,7 @@ beforeEach(() => {
   mockImport.mockReset().mockResolvedValue(IMPORT_OK);
   mockBatch.mockReset().mockResolvedValue(BATCH_OK);
   mockCsv.mockReset().mockResolvedValue({ count: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: "/tmp/x.csv" });
-  mockIris.mockReset().mockResolvedValue({ status: "ok" });
+  mockIris.mockReset().mockResolvedValue({ status: "ok", count: 2, phones: ["+12245550001","+12245550002"] });
   mockTrigger.mockReset().mockResolvedValue({ fired: false, reason: "not_armed", body: "x" });
 });
 

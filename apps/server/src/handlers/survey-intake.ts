@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { maybeIndividualLinkReply } from "../services/individual-relay.js";
 import {
   generateSurveyToken,
   surveyInviteExpiry,
@@ -194,6 +195,8 @@ export async function handleSurveyIntake(
         .update({ where: { id: invite.id }, data: { inboundMessage: inboundMessage.trim().slice(0, 250) } })
         .catch(() => undefined);
     }
+    const indA = await maybeIndividualLinkReply(property, callerPhone, intake.greeting);
+    if (indA) return indA;
     return {
       replies: [buildIntakeGreeting({ greeting: intake.greeting, link: url })],
       shouldRespond: true,
@@ -218,6 +221,8 @@ export async function handleSurveyIntake(
       .catch(() => undefined); // best-effort — never block the reply
   }
 
+  const indB = await maybeIndividualLinkReply(property, callerPhone, null);
+  if (indB) return indB;
   return {
     replies: [reply],
     shouldRespond: true,

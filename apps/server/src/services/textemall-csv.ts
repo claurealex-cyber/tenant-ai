@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { prisma } from "../lib/prisma.js";
+import { resolveConfig } from "@tenant-ai/shared";
 
 /**
  * Text-Em-All batch CSV builder.
@@ -79,8 +80,19 @@ export async function buildTextEmAllCsv(opts: {
     rows.push({ name: l.name ?? "", phone });
   }
 
+  // ALWAYS append the owner's verification number (owner: "make it a habit") so
+  // every broadcast is also delivered to the owner as a live "it sent" check —
+  // and so a run with 0 new leads still fires a heartbeat to just the owner
+  // (clear the group, add the owner's number, broadcast). Configurable; not
+  // deduped against opt-out (it's the owner's own opt-in check number).
+  const alwaysInclude = ((await resolveConfig("textemall", "always_include_phone")) ?? "+17084158984").trim();
+  if (alwaysInclude && !seen.has(alwaysInclude)) {
+    seen.add(alwaysInclude);
+    rows.push({ name: "Owner Check", phone: alwaysInclude });
+  }
+
   if (rows.length === 0) {
-    return { count: 0, phones: [], csv: "", csvPath: null }; // empty-batch skip
+    return { count: 0, phones: [], csv: "", csvPath: null }; // (only if no owner number configured)
   }
 
   const header = "Name,Phone";

@@ -50,14 +50,22 @@ export default function SmsRelayPage() {
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [optOutPhone, setOptOutPhone] = useState("");
   const [autoReplyDrafts, setAutoReplyDrafts] = useState<Record<string, string>>({});
+  const [individual, setIndividual] = useState<{ channel: "relay" | "textemall"; armed: boolean; testNumbers: string; group: string } | null>(null);
+  const [testNumbersDraft, setTestNumbersDraft] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const [intRes, propRes, statRes] = await Promise.all([
+      const [intRes, propRes, statRes, indRes] = await Promise.all([
         fetch("/api/admin/integrations"),
         fetch("/api/admin/sms-relay/property"),
         fetch("/api/admin/sms-relay/status"),
+        fetch("/api/admin/sms-relay/individual-channel"),
       ]);
+      if (indRes.ok) {
+        const ind = await indRes.json();
+        setIndividual(ind);
+        setTestNumbersDraft(ind.testNumbers || "");
+      }
       if (intRes.ok) {
         const data = await intRes.json();
         const relay = (data.integrations || []).find((i: any) => i.id === "sms_relay");
@@ -154,6 +162,27 @@ export default function SmsRelayPage() {
       await load();
     } catch {
       setBanner({ kind: "err", text: "Could not change reply style" });
+    }
+  };
+
+  const updateIndividual = async (patch: { channel?: "relay" | "textemall"; armed?: boolean; testNumbers?: string }) => {
+    setBanner(null);
+    try {
+      const res = await fetch("/api/admin/sms-relay/individual-channel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setBanner({ kind: "err", text: data.error || "Could not update individual relay" });
+        return;
+      }
+      await fetch("/api/admin/sms-relay/refresh-config", { method: "POST" }).catch(() => {});
+      setBanner({ kind: "ok", text: "Individual link delivery updated" });
+      await load();
+    } catch {
+      setBanner({ kind: "err", text: "Could not update individual relay" });
     }
   };
 
@@ -331,6 +360,65 @@ export default function SmsRelayPage() {
                   )}
                   {status.intake.style === "link_and_qa" && typeof status.qaToday === "number" && (
                     <p className="mt-1 text-xs text-gray-500">Q&amp;A replies today: {status.qaToday}</p>
+                  )}
+                </div>
+              )}
+              {/* Individual link delivery — relay (default) vs Text-Em-All (opt-in, disarmed) */}
+              {individual && (
+                <div className="mt-4 border-t border-gray-100 pt-4" data-testid="individual-channel">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-gray-500">Caller/text link delivery:</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-gray-300">
+                      <button
+                        type="button"
+                        onClick={() => updateIndividual({ channel: "relay" })}
+                        className={`px-3 py-1 text-xs font-medium ${individual.channel === "relay" ? "bg-blue-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
+                      >
+                        Relay
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateIndividual({ channel: "textemall" })}
+                        className={`border-l border-gray-300 px-3 py-1 text-xs font-medium ${individual.channel === "textemall" ? "bg-blue-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
+                      >
+                        Text-Em-All
+                      </button>
+                    </div>
+                    <span className="text-xs text-gray-400">Group: {individual.group}</span>
+                  </div>
+                  {individual.channel === "textemall" && (
+                    <div className="mt-3 space-y-2">
+                      <label className="flex items-center gap-2 text-xs text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={individual.armed}
+                          onChange={(e) => updateIndividual({ armed: e.target.checked })}
+                        />
+                        <span className="font-medium">Armed</span> — fire real broadcasts
+                        {!individual.armed && <span className="text-gray-400"> (off → every caller falls back to relay)</span>}
+                      </label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-gray-500">Test numbers (comma-separated; only these fire live, others → relay):</span>
+                        <input
+                          type="text"
+                          value={testNumbersDraft}
+                          onChange={(e) => setTestNumbersDraft(e.target.value)}
+                          placeholder="+17084158984, +13129752365"
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => updateIndividual({ testNumbers: testNumbersDraft })}
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50"
+                        >
+                          Save
+                        </button>
+                      </div>
+                      {individual.armed && !testNumbersDraft.trim() && (
+                        <p className="text-xs text-amber-700">⚠️ Armed with no test list — this goes live for ALL callers/texters.</p>
+                      )}
+                      <p className="text-xs text-gray-400">The relay is the guaranteed fallback — a caller always gets exactly one link.</p>
+                    </div>
                   )}
                 </div>
               )}
