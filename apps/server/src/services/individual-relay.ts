@@ -94,7 +94,12 @@ export async function runIndividualRelay(
 
   // Attempt Text-Em-All: GUI-locked group edit → verify → cap → fire.
   if (!groupId) return doRelay("no individual_group_url configured");
-  const edit = await withGuiLock("individual-relay", () => setGroup({ groupId, phones: [phone] }));
+  // Always include the owner's check number (owner: text me every time it texts an
+  // individual) so the owner gets a copy of every caller's link as a live delivery check.
+  const ownerCheck = ((await resolveConfig("textemall", "always_include_phone")) ?? "+17084158984").trim();
+  const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+  const phones = ownerCheck && digits(ownerCheck) !== digits(phone) ? [phone, ownerCheck] : [phone];
+  const edit = await withGuiLock("individual-relay", () => setGroup({ groupId, phones }));
   if (edit.status !== "ok") return doRelay(`group-set ${edit.status}`);
 
   const claim = await claimFire("individual", { ref: phone, now });
