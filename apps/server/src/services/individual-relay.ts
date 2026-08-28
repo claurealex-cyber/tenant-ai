@@ -145,3 +145,28 @@ export async function maybeIndividualLinkReply(
     : `Thanks for reaching out to ${property.name}! We're texting you the application link shortly.`;
   return { replies: [msg], shouldRespond: true, replyKind: "ai" };
 }
+
+/**
+ * Q&A-path helper (Option B): if the individual Text-Em-All path is eligible for
+ * this number, enqueue the link delivery and return true (the caller then OMITS
+ * the link from its relay reply). Returns false when not eligible → caller keeps
+ * its normal behavior. Same eligibility + E164 + jobId-dedupe as the first-contact
+ * wiring; the job itself handles cooldown, cap, opt-out, and relay-fallback.
+ */
+export async function enqueueIndividualIfEligible(
+  propertyId: string,
+  callerPhone: string,
+  source: string,
+): Promise<boolean> {
+  const E164 = /^\+1\d{10}$/;
+  if (!E164.test(callerPhone)) return false;
+  if (!(await individualTextEmAllEligible(callerPhone))) return false;
+  const { addJob } = await import("../jobs/scheduler.js");
+  const minute = Math.floor(Date.now() / 60_000);
+  await addJob(
+    "individual-relay",
+    { propertyId, callerPhone, source },
+    { jobId: `ind:${callerPhone}:${minute}` },
+  );
+  return true;
+}

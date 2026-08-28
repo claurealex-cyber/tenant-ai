@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { buildQaPrompt, SMS_MAX_CHARS } from "@tenant-ai/shared";
+import { enqueueIndividualIfEligible } from "../services/individual-relay.js";
 import { callChatAPI } from "../services/openai-chat.js";
 import { buildPropertyFacts } from "../services/property-facts.js";
 import type { SmsResult } from "./sms-handler.js";
@@ -85,13 +86,20 @@ export async function handleIntakeQa(ctx: IntakeQaContext): Promise<SmsResult> {
     return { replies: [FALLBACK_REPLY], shouldRespond: true, replyKind: "ai" };
   }
 
+  // Individual Text-Em-All relay (Option B): when the toggle is on + eligible,
+  // deliver the LINK via Text-Em-All (queued) and OMIT it from this relay answer
+  // — so repeat/Q&A texters also get the link via Text-Em-All + the owner gets a
+  // copy. When OFF (default) this returns false → the answer keeps the link exactly
+  // as before (relay byte-identical). The AI conversational answer always relays.
+  const viaTextEmAll = await enqueueIndividualIfEligible(ctx.property.id, ctx.callerPhone, "qa");
+
   // Assemble suffixes FIRST, then truncate the answer to what's left, so the
   // whole thing is exactly one SMS (<= SMS_MAX_CHARS). STOP line and link are
   // never chopped by truncation. The application link is ALWAYS appended (owner
   // requirement: anyone who texts re-receives it, even if they already got it),
-  // unless the model already included it in the answer.
+  // unless the model already included it OR it's being delivered via Text-Em-All.
   const stopSuffix = priorAssistant === 0 ? "\nText STOP to opt out." : "";
-  const nudgeSuffix = answer.includes(ctx.link) ? "" : ` Apply here: ${ctx.link}`;
+  const nudgeSuffix = viaTextEmAll || answer.includes(ctx.link) ? "" : ` Apply here: ${ctx.link}`;
   const reserved = stopSuffix.length + nudgeSuffix.length;
 
   const body = toSingleSms(answer, Math.max(80, SMS_MAX_CHARS - reserved));
