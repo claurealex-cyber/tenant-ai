@@ -43,6 +43,7 @@ export default function ZillowLeadsPage() {
   const [runs, setRuns] = useState<ImportRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [runningNow, setRunningNow] = useState(false);
   const [batchSending, setBatchSending] = useState(false);
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -107,6 +108,33 @@ export default function ZillowLeadsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const runWorkflowNow = async () => {
+    setRunningNow(true);
+    setBanner(null);
+    try {
+      const res = await fetch("/api/admin/zillow/run-now", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && (data.outcome === "ran" || data.run?.status === "done")) {
+        const r = data.run || {};
+        setBanner({
+          kind: "ok",
+          text: `Workflow ran: ${r.leadsNew ?? 0} new lead(s), ${r.sentImmediate ?? r.queuedSends ?? 0} broadcast (you're always included as a delivery check).`,
+        });
+      } else if (data.outcome === "needs_login") {
+        setBanner({ kind: "err", text: "Text-Em-All (or Zillow) needs a signed-in Safari tab — log in and retry." });
+      } else if (data.outcome === "not_in_window" || data.outcome === "disabled" || data.outcome === "claim_lost") {
+        setBanner({ kind: "err", text: `Did not run: ${data.outcome}.` });
+      } else {
+        setBanner({ kind: "err", text: data.error || `Run ${data.outcome || "failed"}: ${data.run?.error || ""}` });
+      }
+      await load();
+    } catch {
+      setBanner({ kind: "err", text: "Run failed — could not reach the API server." });
+    } finally {
+      setRunningNow(false);
+    }
+  };
 
   const runImport = async () => {
     setImporting(true);
@@ -222,6 +250,14 @@ export default function ZillowLeadsPage() {
             </p>
           </div>
           <div className="flex gap-2">
+            <button
+              onClick={runWorkflowNow}
+              disabled={runningNow}
+              title="Scrape → set the Text-Em-All group → broadcast now (bypasses the 10/16/22 schedule). Always includes your number as a delivery check."
+              className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+            >
+              {runningNow ? "Running…" : "Run workflow now"}
+            </button>
             <button
               onClick={runImport}
               disabled={importing}
