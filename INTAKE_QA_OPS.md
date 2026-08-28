@@ -13,7 +13,10 @@ All controls live on **Admin → SMS Relay** (dashboard), take effect within a c
 
 ## Caps & the personal-number caveat
 While the **Messages relay** is on, Q&A answers and caller links go out from the personal number (708) 415-8984. Guardrails:
-- Q&A has its OWN budget, separate from link/forward sends: `qa_hourly_cap` (10), `qa_daily_cap` (40), `qa_daily_cap_per_phone` (8). It never starves the link/forward budget.
+- Q&A has its OWN budget, separate from link/forward sends: `qa_hourly_cap` (10), `qa_daily_cap` (40). It never starves the link/forward budget.
+- **Engaged numbers are never capped (owner rule, 2026-08-28).** A phone that texted in gets an answer every time — the old per-phone daily cap (`qa_daily_cap_per_phone`, 8/day, then silence) was removed. Caps apply only to *new-number* / *volume* sends (`new_recipient_cap`, `hourly_cap`/`daily_cap`, and the two Q&A volume caps above).
+- The only two cases where an engaged texter gets no reply: (1) the global Q&A volume cap is hit — the `ai` row is *deferred* and never retried (a stale answer is worse than none); watch **Q&A replies today** and the deferred rows on the panel; (2) OpenAI is down — one "the team will get back to you" note, then silence until the API answers again.
+- Caveat for when the relay is switched OFF (10DLC): with no per-phone cap, an auto-responder on the far end (out-of-office SMS bot) can loop with our AI indefinitely; the relay's `qa_hourly_cap` is what breaks such loops today. Revisit before going Telnyx-direct (plan: `remove-engaged-number-cap-plan.md`).
 - Caller links are normal `link` sends (link cooldown + budget + new-recipient cap).
 - Watch **Q&A replies today** on the panel. Sustained volume from a personal number risks carrier spam-flagging — raise caps only after watching the ledger, or wait for 10DLC so sends move to the Telnyx number (no caps, no personal-number exposure).
 

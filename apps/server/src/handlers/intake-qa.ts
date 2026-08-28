@@ -1,9 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import {
-  resolveConfig,
-  buildQaPrompt,
-  SMS_MAX_CHARS,
-} from "@tenant-ai/shared";
+import { buildQaPrompt, SMS_MAX_CHARS } from "@tenant-ai/shared";
 import { callChatAPI } from "../services/openai-chat.js";
 import { buildPropertyFacts } from "../services/property-facts.js";
 import type { SmsResult } from "./sms-handler.js";
@@ -43,10 +39,9 @@ async function conversationMessages(propertyId: string, phone: string): Promise<
 /**
  * Answer a prospect's question in Link + Q&A mode, from the property's own data.
  *
- * - Per-phone daily cap is delivery-independent: it counts prior assistant
- *   messages in the (≤24h) SmsConversation, which is populated regardless of
- *   how replies are delivered. One over-cap "team will follow up" note, then
- *   silence.
+ * - Engaged numbers are never capped (owner rule, 2026-08-28): a phone that
+ *   texted in gets an answer every time. Volume / new-number caps live in
+ *   services/relay-guards.ts and are unchanged.
  * - Exactly ONE SMS per answer (never split into several relay sends).
  * - The application link is nudged on the first answer of a conversation with
  *   no link yet, then every 3rd answer, or when they ask how to apply.
@@ -57,18 +52,6 @@ export async function handleIntakeQa(ctx: IntakeQaContext): Promise<SmsResult> {
   const history = await conversationMessages(ctx.property.id, ctx.callerPhone);
   const assistantMsgs = history.filter((m) => m.role === "assistant");
   const priorAssistant = assistantMsgs.length;
-
-  const perPhoneCap = parseInt((await resolveConfig("sms_relay", "qa_daily_cap_per_phone")) || "8", 10);
-  if (priorAssistant > perPhoneCap) {
-    return { replies: [], shouldRespond: false }; // already over cap — stay silent
-  }
-  if (priorAssistant === perPhoneCap) {
-    return {
-      replies: ["Thanks! To keep things easy, the team will follow up with you directly from here."],
-      shouldRespond: true,
-      replyKind: "ai",
-    };
-  }
 
   const { facts, hasAnyFacts } = await buildPropertyFacts(ctx.property.id);
   const systemPrompt = buildQaPrompt({

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vites
 import bcrypt from "bcrypt";
 import { PrismaClient } from "@prisma/client";
 
-const cfg: Record<string, string | null> = { qa_daily_cap_per_phone: "8" };
+const cfg: Record<string, string | null> = {};
 vi.mock("@tenant-ai/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tenant-ai/shared")>();
   return { ...actual, resolveConfig: async (ns: string, key: string, def?: string) => (ns === "sms_relay" && key in cfg ? cfg[key] : actual.resolveConfig(ns, key, def)) };
@@ -42,7 +42,7 @@ afterAll(async () => {
   await prisma.user.deleteMany({ where: { id: userId } });
   await prisma.$disconnect();
 });
-beforeEach(() => { cfg.qa_daily_cap_per_phone = "8"; mockChat.mockReset(); });
+beforeEach(() => { mockChat.mockReset(); });
 
 describe("handleIntakeQa", () => {
   it("answers a rent question and returns replyKind ai", async () => {
@@ -86,23 +86,42 @@ describe("handleIntakeQa", () => {
     expect(res.replies[0].length).toBeLessThanOrEqual(480);
   });
 
-  it("per-phone daily cap: at the cap → one follow-up note; over the cap → silence", async () => {
-    cfg.qa_daily_cap_per_phone = "2";
+  it("engaged numbers are never capped: 20 prior answers → still answered, with the link", async () => {
+    // Owner rule (2026-08-28): a phone that texted in is engaged and is never
+    // capped or silenced. The old per-phone daily cap (8) is gone for good.
+    mockChat.mockResolvedValue({ content: "Yes, one parking spot is included.", functionCalls: [] });
     const p = phone();
-    await seedConv(p, [
-      { role: "user", content: "q1" }, { role: "assistant", content: "a1" },
-      { role: "user", content: "q2" }, { role: "assistant", content: "a2" },
-    ]); // 2 assistant msgs == cap
-    const atCap = await handleIntakeQa(ctx(p, "another question"));
-    expect(atCap.shouldRespond).toBe(true);
-    expect(atCap.replies[0]).toContain("team will follow up");
-    expect(mockChat).not.toHaveBeenCalled();
+    const deep: { role: string; content: string }[] = [];
+    for (let i = 1; i <= 20; i++) {
+      deep.push({ role: "user", content: `q${i}` }, { role: "assistant", content: `a${i}` });
+    }
+    await seedConv(p, deep); // 20 assistant msgs — far past the old cap
+    const res = await handleIntakeQa(ctx(p, "is parking included?"));
+    expect(res.shouldRespond).toBe(true);
+    expect(res.replyKind).toBe("ai");
+    expect(mockChat).toHaveBeenCalledTimes(1);
+    expect(res.replies).toHaveLength(1);
+    expect(res.replies[0]).toContain("parking spot is included");
+    expect(res.replies[0]).toContain(LINK); // link is always nudged
+    // the exact over-cap copy — a model answer may legitimately say "the team will follow up" about an unknown fact
+    expect(res.replies[0]).not.toContain("To keep things easy");
+    expect(res.replies[0]).not.toContain("Text STOP to opt out."); // STOP rides the first answer only
+  });
 
-    await seedConv(p, [
-      { role: "assistant", content: "a1" }, { role: "assistant", content: "a2" }, { role: "assistant", content: "a3" },
-    ]); // over cap
-    const over = await handleIntakeQa(ctx(p, "and another"));
-    expect(over.shouldRespond).toBe(false);
+  it("deep history + OpenAI down → canned fallback once, then silence (the only remaining silent case)", async () => {
+    mockChat.mockRejectedValue(new Error("openai down"));
+    const p = phone();
+    const deep: { role: string; content: string }[] = [];
+    for (let i = 1; i <= 20; i++) {
+      deep.push({ role: "user", content: `q${i}` }, { role: "assistant", content: `a${i}` });
+    }
+    await seedConv(p, deep);
+    const first = await handleIntakeQa(ctx(p, "hello?"));
+    expect(first.shouldRespond).toBe(true);
+    expect(first.replies[0]).toContain("team will get back to you");
+    await seedConv(p, [...deep, { role: "user", content: "hello?" }, { role: "assistant", content: first.replies[0] }]);
+    const second = await handleIntakeQa(ctx(p, "still there?"));
+    expect(second.shouldRespond).toBe(false);
   });
 
   it("OpenAI failure → canned fallback once, then silence", async () => {

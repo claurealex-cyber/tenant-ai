@@ -162,8 +162,35 @@ describe("ingestLeads (real DB)", () => {
   let propertyId: string;
   let runId: string;
 
+  // Fixture phones are FIXED (not prefixed) because ingestLeads dedupes by
+  // phone globally and keeps a lead's ORIGINAL property. A leftover lead from
+  // an earlier run therefore (a) makes "new" assertions fail and (b) gets
+  // re-pointed to THIS run's importRunId, so deleting the run hit the FK and
+  // aborted teardown — orphaning the test user/property every run. Purge by
+  // phone + prefix up front, and tear down child-first by run/property/phone.
+  const FIXTURE_PHONES = ["+13122000001", "+13122000002", "+13122000003", "+13122000777"];
+  const purgeLeftovers = async () => {
+    // ZillowLead.propertyId is a bare column (no Prisma relation), so resolve
+    // the leftover test properties first.
+    const stale = await prisma.property.findMany({
+      where: { name: { startsWith: "test_zillow_" } },
+      select: { id: true },
+    });
+    await prisma.zillowLead.deleteMany({
+      where: {
+        OR: [
+          { phone: { in: FIXTURE_PHONES } },
+          { propertyId: { in: stale.map((p) => p.id) } },
+        ],
+      },
+    });
+    await prisma.property.deleteMany({ where: { name: { startsWith: "test_zillow_" } } });
+    await prisma.user.deleteMany({ where: { email: { startsWith: "test_zillow_" } } });
+  };
+
   beforeAll(async () => {
     await prisma.$connect();
+    await purgeLeftovers();
     const user = await prisma.user.create({
       data: {
         email: `${TEST_PREFIX}@test.com`,
@@ -190,7 +217,9 @@ describe("ingestLeads (real DB)", () => {
   });
 
   afterAll(async () => {
-    await prisma.zillowLead.deleteMany({ where: { propertyId } });
+    await prisma.zillowLead.deleteMany({
+      where: { OR: [{ importRunId: runId }, { propertyId }, { phone: { in: FIXTURE_PHONES } }] },
+    });
     await prisma.zillowImportRun.deleteMany({ where: { id: runId } });
     await prisma.property.deleteMany({ where: { id: propertyId } });
     await prisma.user.deleteMany({ where: { id: userId } });
@@ -252,14 +281,23 @@ describe("ingestLeads (real DB)", () => {
     const before = await prisma.zillowLead.count({ where: { phone: "+13122000777" } });
     expect(before).toBe(1);
 
-    // ...then matching resolves DIFFERENTLY (here: to null — e.g. a stray
-    // second intake property broke the fallback, as happened live 2026-08-26).
+    // ...then matching resolves DIFFERENTLY (here: to null — a stray second
+    // intake property breaks the "single intake property" fallback, exactly as
+    // happened live 2026-08-26). Simulated by ADDING a second intake property
+    // rather than disabling ours: disabling ours made the fallback resolve to
+    // whatever real intake property the dev DB happens to hold (Ghem LLC 1),
+    // which the code rightly treats as a new inquiry — an environment-dependent
+    // failure, not a product one.
     defaultPropertyIdForTest = null;
-    const flapProps = await prisma.property.updateMany({
-      where: { id: propertyId },
-      data: { smsIntakeEnabled: false }, // kills both token-match fallback paths for a NEW address
+    const stray = await prisma.property.create({
+      data: {
+        name: `${TEST_PREFIX}_prop2_stray`,
+        address: "1 Strayberry Ct, Zzville IL 60999",
+        userId,
+        isActive: true,
+        smsIntakeEnabled: true,
+      },
     });
-    expect(flapProps.count).toBe(1);
     try {
       const summary = await ingestLeads(runId, [
         rawLead({
@@ -273,7 +311,7 @@ describe("ingestLeads (real DB)", () => {
       expect(after[0].propertyId).toBe(propertyId); // kept its home
     } finally {
       defaultPropertyIdForTest = propertyId;
-      await prisma.property.updateMany({ where: { id: propertyId }, data: { smsIntakeEnabled: true } });
+      await prisma.property.deleteMany({ where: { id: stray.id } });
     }
   });
 

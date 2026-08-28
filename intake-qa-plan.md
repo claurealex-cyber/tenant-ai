@@ -4,6 +4,10 @@
 
 Build-time root fixes beyond the plan: (1) `callChatAPI` sent `tool_choice` even with no tools → OpenAI 400 on every Q&A call → omit `tool_choice` when tools are empty (caught only by the live gate, mocks hid it); (2) the Q&A "apply here" nudge hardcoded the hosted link → now uses `resolveSurveyLink` so the survey toggle governs it too; (3) STOP/nudge were appended AFTER truncation, overflowing one SMS → reserve their length before truncating; (4) long inbound now capped at 500 chars before the model; (5) `CallLog.transcript` is Json not a scalar list → read-modify-write the "[link texted]" note instead of Prisma `push`; (6) a Python-heredoc mangled regex `\b` into backspace control chars → rewrite regex files via quoted heredocs (lesson).
 
+# rev. 5
+
+**rev. 5 (2026-08-28)** — **per-phone Q&A cap removed** (`qa_daily_cap_per_phone`, rev. 2 (d)) by owner request: caps are for texting *new* numbers and for personal-number volume; a number that texted in is engaged and is never capped or silenced. The test phone hit the cap (8) on 2026-08-28 at 12:55 and went silent — the trigger. Removed from `handlers/intake-qa.ts` and the `sms_relay` registry; the global `qa_hourly_cap`/`qa_daily_cap`, `new_recipient_cap`, `hourly_cap`/`daily_cap` and the link cooldown are unchanged. The OpenAI-down fallback de-dupe is the only remaining silent case. Plan + stress tests: `remove-engaged-number-cap-plan.md`.
+
 # rev. 4
 
 **rev. 4 (2026-08-26)** — added the caller wiring (C1–C3): voice tool `text_application_link`, optional end-of-call send, optional link-only phone flow; all default OFF (today's behavior), all one-click, all use the same `resolveSurveyLink()` so the survey toggle governs calls too. Verified: no existing code path texts a caller; both voice providers share `call-handler.ts`, so one implementation covers Twilio and Telnyx.

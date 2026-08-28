@@ -176,15 +176,6 @@ export const INTEGRATION_REGISTRY: IntegrationDef[] = [
         placeholder: "40",
       },
       {
-        key: "qa_daily_cap_per_phone",
-        label: "Q&A Replies/Day per Phone",
-        envVar: "SMS_RELAY_QA_DAILY_CAP_PER_PHONE",
-        sensitive: false,
-        required: false,
-        placeholder: "8",
-        helpText: "Per-texter daily cap on AI answers (delivery-independent — applies with the relay on or off).",
-      },
-      {
         key: "caller_link",
         label: "Text Callers the Link",
         envVar: "SMS_RELAY_CALLER_LINK",
