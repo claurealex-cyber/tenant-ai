@@ -706,6 +706,16 @@ model TextEmAllBatch {
   updatedAt DateTime @updatedAt
 }
 
+model TextEmAllFire {
+  id        String   @id @default(cuid())
+  month     String   // "YYYY-MM" server-local — the cap bucket
+  path      String   // "zillow" | "individual"
+  ref       String?  // phone or batch slot, for audit
+  createdAt DateTime @default(now())
+
+  @@index([month])
+}
+
 model ZillowAutoRun {
   id            String    @id @default(cuid())
   day           String    // "2026-08-27" server-local — calendar day for grouping/display

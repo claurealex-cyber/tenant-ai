@@ -102,6 +102,9 @@ function IntegrationCard({
   } | null>(null);
   const [saveMessage, setSaveMessage] = useState("");
   const [showPassword, setShowPassword] = useState<Record<string, boolean>>({});
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [revealing, setRevealing] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   function handleFieldChange(key: string, value: string) {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
@@ -109,6 +112,58 @@ function IntegrationCard({
 
   function handleClearField(key: string) {
     setFieldValues((prev) => ({ ...prev, [key]: "" }));
+  }
+
+  async function handleReveal(fieldKey: string) {
+    setRevealing(fieldKey);
+    try {
+      const res = await fetch("/api/admin/integrations/reveal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ integrationId: integration.id, fieldKey }),
+      });
+      const data = await res.json();
+      if (res.ok && data.value != null) {
+        setRevealed((prev) => ({ ...prev, [fieldKey]: data.value }));
+        // Auto-hide after 20s so secrets don't linger on screen.
+        setTimeout(() => setRevealed((prev) => {
+          const next = { ...prev };
+          delete next[fieldKey];
+          return next;
+        }), 20_000);
+      }
+    } finally {
+      setRevealing(null);
+    }
+  }
+
+  function hideRevealed(fieldKey: string) {
+    setRevealed((prev) => {
+      const next = { ...prev };
+      delete next[fieldKey];
+      return next;
+    });
+  }
+
+  async function copyValue(fieldKey: string, value: string) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = value;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(fieldKey);
+      setTimeout(() => setCopied((c) => (c === fieldKey ? null : c)), 1500);
+    } catch {
+      /* clipboard blocked — the value is still selectable in the box */
+    }
   }
 
   async function handleSave() {
@@ -270,6 +325,16 @@ function IntegrationCard({
                       </button>
                     )}
                   </div>
+                  {field.hasValue && (
+                    <button
+                      type="button"
+                      className="rounded-md border border-gray-300 px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                      disabled={revealing === field.key}
+                      onClick={() => (revealed[field.key] ? hideRevealed(field.key) : handleReveal(field.key))}
+                    >
+                      {revealing === field.key ? "…" : revealed[field.key] ? "Hide" : "Reveal"}
+                    </button>
+                  )}
                   {field.source === "database" && (
                     <button
                       type="button"
@@ -280,6 +345,20 @@ function IntegrationCard({
                     </button>
                   )}
                 </div>
+                {revealed[field.key] !== undefined && (
+                  <div className="mt-2 flex items-center gap-2 rounded-md bg-gray-50 border border-gray-200 px-3 py-2">
+                    <code className="flex-1 select-all break-all font-mono text-xs text-gray-800">
+                      {revealed[field.key]}
+                    </code>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+                      onClick={() => copyValue(field.key, revealed[field.key])}
+                    >
+                      {copied === field.key ? "Copied ✓" : "Copy"}
+                    </button>
+                  </div>
+                )}
                 {field.helpText && (
                   <p className="mt-1 text-xs text-gray-400">
                     {field.helpText}
@@ -343,6 +422,53 @@ export default function AdminIntegrationsPage() {
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [transferMsg, setTransferMsg] = useState("");
+
+  async function handleExport() {
+    setTransferMsg("");
+    try {
+      const res = await fetch("/api/admin/integrations/export", { method: "POST" });
+      if (!res.ok) {
+        setTransferMsg("Export failed.");
+        return;
+      }
+      const text = await res.text();
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "tenant-ai-integrations-export.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      const count = JSON.parse(text)?._meta?.count ?? "?";
+      setTransferMsg(`Exported ${count} keys. ⚠️ This file is your API keys in plain text — import it on the other instance, then delete it.`);
+    } catch {
+      setTransferMsg("Export failed.");
+    }
+  }
+
+  async function handleImportFile(file: File) {
+    setTransferMsg("");
+    try {
+      const payload = JSON.parse(await file.text());
+      const res = await fetch("/api/admin/integrations/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTransferMsg(data.error || "Import failed.");
+        return;
+      }
+      setTransferMsg(`Imported ${data.imported} keys${data.skipped ? `, skipped ${data.skipped}` : ""}. Reloading…`);
+      await loadIntegrations();
+    } catch {
+      setTransferMsg("Import failed — not a valid export file.");
+    }
+  }
 
   const loadIntegrations = useCallback(async () => {
     try {
@@ -368,12 +494,42 @@ export default function AdminIntegrationsPage() {
   return (
     <DashboardShell>
       <div className="px-6 py-8 lg:px-8">
-        <div className="mb-8">
-          <h1 className="text-2xl font-bold text-gray-900">Integrations</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Configure external service API keys and test connections.
-          </p>
+        <div className="mb-8 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Integrations</h1>
+            <p className="mt-1 text-sm text-gray-500">
+              Configure external service API keys and test connections.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExport}
+              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              title="Download all API keys as JSON to import on another instance"
+            >
+              Export keys
+            </button>
+            <label className="cursor-pointer rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+              Import keys
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleImportFile(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </div>
         </div>
+        {transferMsg && (
+          <div className="mb-6 rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+            {transferMsg}
+          </div>
+        )}
 
         {error && (
           <div className="mb-6 rounded-md bg-red-50 p-4 text-sm text-red-700">

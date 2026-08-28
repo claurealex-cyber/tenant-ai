@@ -8,9 +8,14 @@ export type IrisUploadResult =
   | { status: "needs_login" }
   | { status: "failed"; detail: string };
 
-/** Iris turn budget. Bumped from 80 → 140 so the delete+import+verify sequence
- * finishes and still has room to print the final marker even on a slow GUI. */
-const IRIS_MAX_TURNS = 140;
+/** Iris turn budget. The Text-Em-All contact-list dropdown isn't in the AX tree,
+ * so iris re-observes per contact and the one-by-one clear is turn-hungry; the
+ * group must stay the same (Zapier is bound to it), so we give iris a large
+ * budget to fully clear + import rather than change the group. Overridable via
+ * IRIS_MAX_TURNS. */
+const IRIS_MAX_TURNS = Number(process.env.IRIS_MAX_TURNS) || 500;
+/** Match the timeout to the larger turn budget (default 40 min). */
+const IRIS_TIMEOUT_MS = Number(process.env.IRIS_TIMEOUT_MS) || 40 * 60_000;
 
 /**
  * The natural-language goal handed to Iris to drive the Text-Em-All GUI.
@@ -87,7 +92,7 @@ export async function irisUploadToGroup(
         const { stdout, stderr } = await pExecFile(
           process.env.IRIS_BIN || "iris",
           ["-p", g, "--permission-mode", "dangerFullAccess", "--max-turns", String(IRIS_MAX_TURNS)],
-          { timeout: opts.timeoutMs ?? 15 * 60_000, maxBuffer: 16 * 1024 * 1024 },
+          { timeout: opts.timeoutMs ?? IRIS_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
         );
         return (stdout || "") + "\n" + (stderr || "");
       });

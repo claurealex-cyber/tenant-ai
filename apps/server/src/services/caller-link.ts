@@ -4,6 +4,8 @@ import { resolveSurveyLink, buildIntakeReply } from "../handlers/survey-intake.j
 import { relaySendWithGuards } from "./relay-guards.js";
 import { rewriteForRelay } from "../routes/telnyx-sms.js";
 import { sendTelnyxSms } from "./telnyx-client.js";
+import { individualTextEmAllEligible } from "./individual-relay.js";
+import { addJob } from "../jobs/scheduler.js";
 
 export type CallerLinkResult =
   | { status: "sent" | "already_sent" }
@@ -33,6 +35,21 @@ export async function textLinkToCaller(opts: {
 
   const optedOut = await prisma.smsOptOut.findFirst({ where: { phone: callerPhone } });
   if (optedOut) return { status: "cannot_text", reason: "caller has opted out of texts" };
+
+  // Individual Text-Em-All relay (toggle): when the channel is on, armed, and the
+  // number is whitelisted (if a whitelist is set), hand the LINK delivery to the
+  // queued job — it sets the group to this number, fires the trigger, and falls
+  // back to the relay on any failure (R1). Every other case → relay below. jobId
+  // dedupes webhook retries within the minute (R6).
+  if (await individualTextEmAllEligible(callerPhone)) {
+    const minute = Math.floor(Date.now() / 60_000);
+    await addJob(
+      "individual-relay",
+      { propertyId: property.id, callerPhone, source: opts.source },
+      { jobId: `ind:${callerPhone}:${minute}` },
+    );
+    return { status: "sent" };
+  }
 
   const { url, invite } = await resolveSurveyLink(property, callerPhone);
   const text = buildIntakeReply({ name: property.name, intakeAutoReply: null }, url);

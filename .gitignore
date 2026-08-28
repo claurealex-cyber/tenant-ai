@@ -41,3 +41,7 @@ coverage/
 
 # Text-Em-All batch CSVs (lead PII — never commit)
 .textemall/
+
+# Generated Text-Em-All CSVs contain real lead phone numbers — never commit
+textemall-uploads/
+.textemall/
