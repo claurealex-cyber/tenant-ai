@@ -288,6 +288,34 @@ describe("getAutoStatus", () => {
     expect(status.deferredQueue).toHaveProperty("oldestAgeDays");
     expect(Array.isArray(status.last30Days)).toBe(true);
   });
+
+  it("schedule block: hourly window mode (relay) — label, runs/day, next run, no cap warning", async () => {
+    const status = await getAutoStatus(testNow(12));
+    expect(status.schedule).toMatchObject({
+      mode: "hourly", startHour: 9, endHour: 22, runsPerDay: 14, label: "hourly from 09:00 to 22:00",
+      nextRunLabel: "13:00", channel: "relay", capWarning: false, timezone: "America/Chicago",
+    });
+    expect(status.nextRunLabel).toBe(status.schedule.nextRunLabel);
+    expect(status.autoHour).toBe(9);
+  });
+
+  it("schedule block: fixed hours on Text-Em-All — 3×/day inside the cap, 4×/day warns; autoHour = first run hour", async () => {
+    cfg.runHours = "10,16,22"; cfg.channel = "textemall";
+    let status = await getAutoStatus(testNow(11));
+    expect(status.schedule).toMatchObject({ mode: "fixed", hours: [10, 16, 22], runsPerDay: 3, monthlyEstimate: 93, monthlyCap: 96, capWarning: false, label: "3×/day at 10:00, 16:00, 22:00", nextRunLabel: "16:00" });
+    expect(status.autoHour).toBe(10);
+    cfg.runHours = "9,12,16,20";
+    status = await getAutoStatus(testNow(11));
+    expect(status.schedule).toMatchObject({ runsPerDay: 4, monthlyEstimate: 124, capWarning: true });
+    cfg.monthlyCap = "130";
+    status = await getAutoStatus(testNow(11));
+    expect(status.schedule).toMatchObject({ monthlyCap: 130, capWarning: false });
+  });
+
+  it("schedulerOnline is false in the test process (no zillow-daily job registered)", async () => {
+    const status = await getAutoStatus(testNow(11));
+    expect(status.schedulerOnline).toBe(false);
+  });
 });
 
 describe("send_channel branch (Text-Em-All foundation)", () => {
@@ -432,6 +460,38 @@ describe("auto_run_hours (free-tier 3×/day cadence)", () => {
     expect((await getAutoStatus(at(16))).nextRunLabel).toBe("22:00");
     expect((await getAutoStatus(at(22))).nextRunLabel).toBe("10:00 (tomorrow)");
     expect((await getAutoStatus(at(23))).nextRunLabel).toBe("10:00 (tomorrow)");
+  });
+
+  it("a FAILED batch does not block its slot: the next same-slot run rebuilds and retries the broadcast", async () => {
+    cfg.runHours = "10,16,22"; cfg.channel = "textemall";
+    const base = nextDay(10);
+    mockIris.mockResolvedValueOnce({ status: "failed", detail: "group-set 500" });
+    const first = await runDailyAutomation({ now: base, scheduled: true });
+    expect(first.outcome).toBe("failed");
+    const failedBatch = await prisma.textEmAllBatch.findUnique({ where: { slot: localSlot(base) } });
+    expect(failedBatch?.status).toBe("failed");
+    mockCsv.mockClear(); mockIris.mockClear();
+    // failed run rows are reclaimable in the same slot; the batch must be rebuilt, not skipped
+    const second = await runDailyAutomation({ now: new Date(base), scheduled: true });
+    expect(second.outcome).toBe("ran");
+    expect(mockCsv).toHaveBeenCalledTimes(1);
+    expect(mockIris).toHaveBeenCalledTimes(1);
+    const rebuilt = await prisma.textEmAllBatch.findUnique({ where: { slot: localSlot(base) } });
+    expect(rebuilt?.status).toBe("uploaded"); // trigger not armed in this fixture
+  });
+
+  it("a SENT batch still blocks its slot (no re-broadcast)", async () => {
+    cfg.runHours = "10,16,22"; cfg.channel = "textemall";
+    mockTrigger.mockResolvedValue({ fired: true, status: 200 });
+    const base = nextDay(16);
+    await runDailyAutomation({ now: base, scheduled: true });
+    expect((await prisma.textEmAllBatch.findUnique({ where: { slot: localSlot(base) } }))?.status).toBe("sent");
+    // force a same-slot re-entry without `force` (a reclaim needs a failed row → simulate by resetting the run row)
+    await prisma.zillowAutoRun.updateMany({ where: { slot: localSlot(base) }, data: { status: "failed" } });
+    mockCsv.mockClear();
+    const again = await runDailyAutomation({ now: new Date(base), scheduled: true });
+    expect(again.outcome).toBe("ran");
+    expect(mockCsv).not.toHaveBeenCalled();
   });
 
   it("monthly soft cap: at/over cap → no broadcast (no Iris, no fire)", async () => {

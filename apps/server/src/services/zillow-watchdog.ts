@@ -18,12 +18,12 @@
  */
 import { resolveConfig } from "@tenant-ai/shared";
 import { prisma } from "../lib/prisma.js";
-import { getJobState, type JobState } from "../jobs/scheduler.js";
+import { getJobState, jobStateAlive, JOB_STALE_MS, type JobState } from "../jobs/scheduler.js";
 import { notifyOnMac } from "./messages-relay.js";
 import { autoConfig, STALE_RUNNING_MS } from "./zillow-auto.js";
 
 /** The hourly tick stamps lastRunAt every hour (run hour or not); older = dead. */
-export const SCHEDULER_STALE_MS = 65 * 60_000;
+export const SCHEDULER_STALE_MS = JOB_STALE_MS;
 /** A slot is judged once its hour ended this long ago (late-in-hour runs settle). */
 export const SLOT_GRACE_MS = 5 * 60_000;
 /** Never judge slots older than this (bounded catch-up after long sleeps). */
@@ -91,9 +91,7 @@ const hhmm = (h: number) => `${pad(h)}:00`;
 
 /** Registered AND ticked (or freshly registered) within the last 65 minutes. */
 export function isSchedulerOnline(state: JobState, now: Date): boolean {
-  if (!state.registered) return false;
-  const ref = state.lastRunAt ?? state.registeredAt;
-  return !!ref && now.getTime() - ref.getTime() <= SCHEDULER_STALE_MS;
+  return jobStateAlive(state, now, SCHEDULER_STALE_MS);
 }
 
 export function isScheduledHour(hour: number, s: WatchdogSchedule): boolean {

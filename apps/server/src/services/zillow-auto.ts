@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
-import { resolveConfig } from "@tenant-ai/shared";
+import { resolveConfig, scheduleSummary, DEFAULT_MONTHLY_FIRE_CAP, type ScheduleSummary } from "@tenant-ai/shared";
+import { getJobState, jobStateAlive } from "../jobs/scheduler.js";
 import { runZillowImport } from "./zillow-import.js";
 import { sendSurveyBatch } from "./zillow-send.js";
 import { buildTextEmAllCsv } from "./textemall-csv.js";
@@ -245,8 +246,12 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
         broadcastSlot = `${day}T${String(bh).padStart(2, "0")}`;
       }
       // A broadcast already claimed for THIS key → skip (idempotent).
+      // A broadcast already SENT (or uploaded, awaiting an armed trigger) for THIS
+      // key → skip (idempotent). A `built` (crashed mid-run) or `failed` (upload
+      // error) batch does NOT block the key: it is rebuilt so the next in-window
+      // tick (hourly mode) or same-slot reclaim (fixed mode) retries it.
       const already = await prisma.textEmAllBatch.findUnique({ where: { slot: broadcastSlot } });
-      if (already && !force) {
+      if (already && !force && (already.status === "sent" || already.status === "uploaded")) {
         const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
         return { outcome: "ran", run: toRunSummary(row) };
       }
@@ -254,7 +259,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // month; refuse to fire beyond the cap so a stray month can't blow past 100
       // Zapier tasks. Checked BEFORE the Iris GUI work so we don't delete/upload
       // for a fire we won't make.
-      const monthCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), 96);
+      const monthCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), DEFAULT_MONTHLY_FIRE_CAP);
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
       const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       const sentThisMonth = await prisma.textEmAllBatch.count({
@@ -354,6 +359,10 @@ export interface AutoStatus {
   last30Days: NonNullable<AutoRunResult["run"]>[];
   deferredQueue: { depth: number; oldestAgeDays: number | null };
   totals: { leads: number; numbersMessaged: number; applied: number };
+  /** Editable schedule + derived labels/estimates (shared helper — same math as the dashboard). */
+  schedule: ScheduleSummary;
+  /** false = the hourly tick is not alive (Redis down / job never registered): NO scheduled run will fire. */
+  schedulerOnline: boolean;
 }
 
 export async function getAutoStatus(now = new Date()): Promise<AutoStatus> {
@@ -368,23 +377,13 @@ export async function getAutoStatus(now = new Date()): Promise<AutoStatus> {
     prisma.zillowLead.count({ where: { status: "applied" } }),
   ]);
 
-  const h = now.getHours();
-  const hhmm = (hr: number) => `${String(hr).padStart(2, "0")}:00`;
-  let nextRunLabel: string | null;
-  if (!enabled) {
-    nextRunLabel = null;
-  } else if (runHours) {
-    // Fixed-hour cadence (e.g. 10/16/22): the next run hour strictly after now,
-    // wrapping to the first hour tomorrow.
-    const nextToday = runHours.find((hr) => hr > h);
-    nextRunLabel = nextToday !== undefined ? hhmm(nextToday) : `${hhmm(runHours[0])} (tomorrow)`;
-  } else if (h < startHour) {
-    nextRunLabel = hhmm(startHour);
-  } else if (h >= endHour) {
-    nextRunLabel = `${hhmm(startHour)} (tomorrow)`;
-  } else {
-    nextRunLabel = hhmm(h + 1);
-  }
+  const channel = (await resolveConfig("zillow", "send_channel")) === "textemall" ? "textemall" : "relay";
+  const monthlyCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), DEFAULT_MONTHLY_FIRE_CAP);
+  const schedule = scheduleSummary({
+    enabled, runHours, startHour, endHour, channel, monthlyCap, nowHour: now.getHours(),
+  });
+  const nextRunLabel = schedule.nextRunLabel;
+  const schedulerOnline = jobStateAlive(getJobState("zillow-daily"), now);
 
   // Numbers successfully messaged: distinct lead phones with ≥1 sent link row
   // (ledger truth, joined through the lead's invite).
@@ -427,6 +426,8 @@ export async function getAutoStatus(now = new Date()): Promise<AutoStatus> {
     googleFormMode,
     today: todayRow ? toRunSummary(todayRow) : null,
     last30Days: recent.map((r) => toRunSummary(r)!),
+    schedule,
+    schedulerOnline,
     deferredQueue: {
       depth: deferredDepth,
       oldestAgeDays: oldestDeferred

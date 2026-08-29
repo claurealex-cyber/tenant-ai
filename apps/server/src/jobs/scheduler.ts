@@ -41,6 +41,16 @@ export interface JobState {
  * unavailable at boot — index.ts logs and continues, so the server is up but
  * this job will never tick until a restart with Redis up).
  */
+/** The hourly tick stamps lastRunAt every hour (run hour or not); older than this = dead. */
+export const JOB_STALE_MS = 65 * 60_000;
+
+/** Registered AND ticked (or freshly registered) within `staleMs`. */
+export function jobStateAlive(state: JobState, now: Date, staleMs = JOB_STALE_MS): boolean {
+  if (!state.registered) return false;
+  const ref = state.lastRunAt ?? state.registeredAt;
+  return !!ref && now.getTime() - ref.getTime() <= staleMs;
+}
+
 export function getJobState(name: string): JobState {
   const e = registry.get(name);
   return e
