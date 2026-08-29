@@ -107,6 +107,11 @@ export async function runIndividualRelay(
       "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
     const bc = await withGuiLock("individual-relay", () => sendBroadcastViaApi({ phones, message }));
     if (bc.status !== "ok") return doRelay(`broadcast ${bc.status}`);
+    // Verify the CALLER's number actually made it into the broadcast — if only the
+    // owner-check got added, the caller didn't get the link, so relay-fallback.
+    const callerDigits = phone.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
+    const sent = new Set(bc.sentPhones.map((p) => p.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")));
+    if (!sent.has(callerDigits)) return doRelay("caller not in broadcast");
     await claimFire("individual", { ref: phone, now }).catch(() => {});
     return { via: "textemall", status: 200 };
   }

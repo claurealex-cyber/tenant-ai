@@ -304,13 +304,23 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
           const row = await finishRow(claim, bc.status === "needs_login" ? "needs_login" : "failed", { error: `textemall broadcast ${bc.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
           return { outcome: bc.status === "needs_login" ? "needs_login" : "failed", run: toRunSummary(row) };
         }
-        await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "sent" } });
-        await prisma.zillowLead.updateMany({
-          where: { phone: { in: csv.phones }, status: "new" },
-          data: { status: "invited", sentVia: "textemall", sentBatchId: batchRow.id },
-        }).catch((e) => console.error("textemall lead flip failed (broadcast already sent, safe):", e));
-        console.log(`[zillow-auto] textemall API broadcast ${bc.broadcastId} → ${bc.recipients} recipient(s).`);
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: bc.recipients, sentDelta: bc.recipients });
+        await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "sent", phones: bc.sentPhones } });
+        // Flip ONLY the leads that ACTUALLY made it into the broadcast (bc.sentPhones),
+        // not the whole intended batch — a lead whose add failed must NOT be marked
+        // sent (it'll be re-attempted next run). Match on E.164 or 10-digit.
+        const sentDigits = new Set(bc.sentPhones.map((p) => p.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")));
+        const toFlip = await prisma.zillowLead.findMany({
+          where: { phone: { in: csv.phones }, status: "new" }, select: { id: true, phone: true },
+        });
+        const flipIds = toFlip.filter((l) => sentDigits.has((l.phone ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""))).map((l) => l.id);
+        if (flipIds.length) {
+          await prisma.zillowLead.updateMany({
+            where: { id: { in: flipIds } },
+            data: { status: "invited", sentVia: "textemall", sentBatchId: batchRow.id },
+          }).catch((e) => console.error("textemall lead flip failed (broadcast already sent, safe):", e));
+        }
+        console.log(`[zillow-auto] textemall API broadcast ${bc.broadcastId} → ${bc.recipients} recipient(s); flipped ${flipIds.length} lead(s).`);
+        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: bc.recipients, sentDelta: flipIds.length });
         return { outcome: "ran", run: toRunSummary(row) };
       }
 

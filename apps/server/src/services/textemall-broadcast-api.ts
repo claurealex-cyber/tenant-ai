@@ -18,7 +18,7 @@ const pExecFile = promisify(execFile);
  */
 
 export type BroadcastResult =
-  | { status: "ok"; broadcastId: number; recipients: number }
+  | { status: "ok"; broadcastId: number; recipients: number; sentPhones: string[] }
   | { status: "needs_login" }
   | { status: "failed"; detail: string };
 
@@ -43,13 +43,13 @@ export function buildBroadcastJs(
       var id=JSON.parse(dr.responseText).DraftBroadcastID;
       var tp=req('PUT','/proxy/draft-broadcasts/'+id+'/type',{BroadcastTypeDesc:'SMS',IsTextSurvey:false});
       if(tp.status>=400) return JSON.stringify({r:'failed',d:'type '+tp.status});
-      var added=0;
-      phones.forEach(function(p){ var c=req('POST','/proxy/draft-broadcasts/'+id+'/contacts',{FirstName:'',LastName:'',PrimaryPhone:p,Notes:'',CustomData:{},PrimaryPhoneError:'',FirstNameError:'',LastNameError:''}); if(c.status<400)added++; });
-      if(added===0) return JSON.stringify({r:'failed',d:'no recipients added'});
+      var added=[];
+      phones.forEach(function(p){ var c=req('POST','/proxy/draft-broadcasts/'+id+'/contacts',{FirstName:'',LastName:'',PrimaryPhone:p,Notes:'',CustomData:{},PrimaryPhoneError:'',FirstNameError:'',LastNameError:''}); if(c.status<400)added.push(p); });
+      if(added.length===0) return JSON.stringify({r:'failed',d:'no recipients added'});
       var fin=req('POST','/proxy/broadcasts',{DraftBroadcastID:id,BroadcastName:${JSON.stringify(name)},BroadcastType:'SMS',CallerID:${JSON.stringify(callerId)},CallThrottle:0,CheckCallingWindow:false,ContinueOnNextDay:true,IncludeSignature:false,IsTextSurvey:false,RepeatingBroadcastSchedule:null,StartDate:null,templateData:{TemplateMerge:null},TextMessage:${JSON.stringify(message)},TextNumberID:${textNumberId},IsNearEndOfCallingWindow:false});
       if(fin.status>=400) return JSON.stringify({r:'failed',d:'send '+fin.status+' '+String(fin.responseText).slice(0,120)});
       var bid=0; try{bid=JSON.parse(fin.responseText).BroadcastID||0;}catch(e){}
-      return JSON.stringify({r:'ok',broadcastId:bid,recipients:added});
+      return JSON.stringify({r:'ok',broadcastId:bid,added:added});
     }catch(e){ return JSON.stringify({r:'failed',d:String(e).slice(0,160)}); }
   })();`;
 }
@@ -82,11 +82,16 @@ export async function sendBroadcastViaApi(
   const textNumberId = parseInt((await resolveConfig("textemall", "broadcast_text_number_id")) || "84582", 10);
   const callerId = (await resolveConfig("textemall", "broadcast_caller_id")) || "(773) 376-0486";
   const name = (await resolveConfig("textemall", "broadcast_name")) || "Ghem Leads";
-  const run = deps.run ?? ((js: string) => runInTeaTab(js, opts.timeoutMs ?? 60_000));
+  const run = deps.run ?? ((js: string) => runInTeaTab(js, opts.timeoutMs ?? 180_000));
   try {
     const out = await run(buildBroadcastJs(opts.phones, opts.message, textNumberId, callerId, name));
-    const p = JSON.parse(out) as { r: string; broadcastId?: number; recipients?: number; d?: string };
-    if (p.r === "ok") return { status: "ok", broadcastId: p.broadcastId ?? 0, recipients: p.recipients ?? 0 };
+    const p = JSON.parse(out) as { r: string; broadcastId?: number; added?: string[]; d?: string };
+    if (p.r === "ok") {
+      // `added` are the 10-digit numbers that actually made it into the broadcast.
+      // Map back to E.164 so callers flip/verify only who was really sent to.
+      const sentPhones = (p.added ?? []).map((d) => (d.length === 10 ? `+1${d}` : d));
+      return { status: "ok", broadcastId: p.broadcastId ?? 0, recipients: sentPhones.length, sentPhones };
+    }
     if (p.r === "needs_login") return { status: "needs_login" };
     return { status: "failed", detail: p.d ?? "unknown" };
   } catch (err) {
