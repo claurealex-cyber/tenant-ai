@@ -50,7 +50,10 @@ export default function DeliveryMethodPanel({ lane }: { lane: "zillow" | "indivi
   const current = laneStatus ? laneToMethod(laneStatus) : null;
 
   const choose = async (method: Method) => {
-    if (saving || method === current) return;
+    // Allow re-clicking the current method: writes are idempotent, so this lets
+    // the user REPAIR a half-set state (e.g. channel on but not armed) instead of
+    // being stuck because the fix looks already-selected.
+    if (saving) return;
     setSaving(true);
     setError(null);
     try {

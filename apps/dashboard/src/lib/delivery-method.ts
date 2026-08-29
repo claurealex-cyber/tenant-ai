@@ -34,6 +34,10 @@ export async function setLaneDeliveryMethod(lane: Lane, method: Method, userId: 
     } else {
       writes.push(up("zillow.send_channel", "textemall", userId));
       writes.push(up("zillow.broadcast_method", method === "api" ? "api" : "form", userId));
+      // The Zillow FORM/Zapier path fires fireTextEmAllTrigger, which is gated by
+      // trigger_armed; without arming it would upload contacts but never send.
+      // (The API path returns before that gate, so it needs no arming.)
+      if (method === "zapier") writes.push(up("textemall.trigger_armed", "true", userId));
     }
   } else {
     if (method === "imessage") {
