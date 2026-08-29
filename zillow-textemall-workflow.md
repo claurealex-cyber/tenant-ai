@@ -292,3 +292,27 @@ separate infra is far simpler.)
 - **Relay/Twilio path is separate** and must remain untouched by the channel switch.
 - The Google form trigger is a public-ish endpoint — guard it with a token/Filter and
   don't publish the real IDs.
+
+## Editing the schedule (run times + runs/day) — added 2026-08-29
+
+Admin → Zillow → **Daily automation → Schedule**. Two modes, saved via `POST /api/admin/zillow/schedule`
+(the *only* writer of `zillow.auto_run_hours` / `auto_start_hour` / `auto_end_hour` /
+`textemall_broadcast_hour`; encrypted, audit-logged as `zillow_schedule`, live in both processes at once):
+
+- **Fixed times** (default): pick hours on the 24-chip row or a preset — 1×/day (10), 2×/day (10, 16),
+  **3×/day (10, 16, 22) = Zapier-free-tier safe**, 4×/day (9, 12, 16, 20). *Runs per day is the number of
+  chips selected.* Each run = scrape + broadcast (per-hour idempotent).
+- **Hourly window**: scrape every hour from … to …; on the Text-Em-All channel the broadcast goes out
+  **once a day at "Broadcast at"** (`textemall_broadcast_hour`, default 12:00).
+- The summary shows `N×/day at …`, the next run, and **≈ N×31 broadcasts/month of cap 96**. On the
+  Text-Em-All channel a schedule over the cap is refused until you click **Save anyway** — the monthly
+  cap (`textemall.monthly_fire_cap`) remains the hard stop in the engine.
+- Fine print: :00 only · Chicago time · runs fire only while the Mac is awake · a change takes effect at
+  the next :00 · missed runs are not caught up · 00–06 chips are hinted as "usually asleep".
+
+**Watchdog + supervisor (no more unscheduled runs).** An in-process watchdog (`zillow-watchdog.ts`,
+plain `setInterval`, not BullMQ) judges each scheduled hour after it has fully passed and notifies on the
+Mac ("Tenant AI Zillow") about runs that did not happen / failed / crashed / need a Safari login, and about
+the scheduler going offline (Redis) — the dashboard shows a red **"Scheduled runs are NOT firing"** banner
+in that case. The Iris 09:30 supervisor is liveness + yesterday's digest only and **never triggers a run**
+(its old auto-run POST bypassed the schedule and caused the unscheduled 09:30 run on 2026-08-28).

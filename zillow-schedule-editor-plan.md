@@ -261,3 +261,18 @@ hour = normal run. Skip if not wanted — nothing else depends on it.
 | `apps/dashboard/src/app/admin/zillow/AutomationPanel.tsx` (+test) | M3 |
 | `zillow-auto.ts`, panel, tests | M4 (optional) |
 | `zillow-textemall-workflow.md`, memory | M5 |
+
+## Execution record (2026-08-29, worktree `~/tenant-ai-wt/zillow-schedule`, branch `zillow-schedule-editor` off `main` 2199898)
+
+Built in an isolated git worktree because another session was building in `~/tenant-ai`; per-milestone
+commits by explicit path; stress-tested at each milestone.
+
+| Milestone | Commit | Result / stress test |
+|---|---|---|
+| Worktree setup | — | `npm ci` 13 s; **Prisma client had to be generated** (`prisma generate`) and `apps/server/.env` + `apps/dashboard/.env` copied — the generated client records the env path at generate time, so generate AFTER copying. Baseline 59/59 on the three Zillow suites. |
+| **M0** watchdog + supervisor | `9d147fe` | 14 + 7 tests; tsc clean. Live dry-runs against the real DB/server with notifications stubbed: watchdog judged one settled slot and (correctly, out-of-process) reported "scheduler OFFLINE"; supervisor script → `all clear (yesterday 4 run(s) ok)`. **Root fix found by the dry-run:** the live (old) server's status has no `slot` field → the per-slot digest would have false-alarmed at 09:30 before the restart → day-level fallback added + test. |
+| **M1** shared model + status + batch fix | `0ea360c` | 68/68 across M0/M1 suites. **Mutation check:** restoring the any-status skip makes the new "failed batch is rebuilt" test fail (×). Full suite 1904 pass; the 5 `textemall-csv` failures are **pre-existing on main** (the other session's "owner check number" commit changed `buildTextEmAllCsv` without updating its tests — left alone, their area); `billing-cycle` is a parallel-run flake (passes alone in both trees). |
+| **M2** schedule route | `4f58eec` | 8 route tests + toggle suite (18/18). |
+| **M3** editor | `21f1d62` | 7 pure-logic tests; dashboard Zillow suites 35/35; `next build` clean; smoke-served on :3100 (login 200, `/admin/zillow` 307→login). **Bug caught in self-review:** `load`'s stale `useCallback` closure would have wiped unsaved edits on every reload → ref mirror. |
+| **M4** scrape-only hours | — | Not built (optional; owner has not asked). |
+| **M5** docs / deploy | this commit | `zillow-textemall-workflow.md` section; deploy via fast-forward merge into `main` + launchd restart (see below). |
