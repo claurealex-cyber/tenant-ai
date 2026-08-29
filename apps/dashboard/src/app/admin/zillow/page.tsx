@@ -50,7 +50,7 @@ export default function ZillowLeadsPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [page, setPage] = useState(0);
   const [confirmBatch, setConfirmBatch] = useState(false);
-  const [autoInfo, setAutoInfo] = useState<{ enabled: boolean; startHour?: number; endHour?: number; runHours?: number[] | null; nextRunLabel?: string | null } | null>(null);
+  const [autoInfo, setAutoInfo] = useState<{ enabled: boolean; startHour?: number; endHour?: number; runHours?: number[] | null; nextRunLabel?: string | null; label?: string | null } | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [pollPaused, setPollPaused] = useState(false);
 
@@ -83,7 +83,7 @@ export default function ZillowLeadsPage() {
         const res = await fetch("/api/admin/zillow/auto-status", { cache: "no-store" });
         if (!res.ok) throw new Error("status");
         const st = await res.json();
-        setAutoInfo({ enabled: st.enabled, startHour: st.startHour, endHour: st.endHour, runHours: st.runHours, nextRunLabel: st.nextRunLabel });
+        setAutoInfo({ enabled: st.enabled, startHour: st.startHour, endHour: st.endHour, runHours: st.runHours, nextRunLabel: st.nextRunLabel, label: st.schedule?.label ?? null });
         const newSig = `${st.totals?.leads}|${st.today?.status}|${st.today?.leadsNew}|${st.today?.sentImmediate}`;
         if (sig && newSig !== sig) await load(); // automation did something → refresh the list
         sig = newSig;
@@ -400,9 +400,10 @@ export default function ZillowLeadsPage() {
                   </span>
                   {autoInfo.enabled && (
                     <>
-                      {" "}· {autoInfo.runHours && autoInfo.runHours.length
-                        ? `${autoInfo.runHours.length}×/day ${autoInfo.runHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(", ")}`
-                        : `hourly ${autoInfo.startHour ?? 8}:00–${autoInfo.endHour ?? 22}:00`}
+                      {" "}· {autoInfo.label
+                        ?? (autoInfo.runHours && autoInfo.runHours.length
+                          ? `${autoInfo.runHours.length}×/day ${autoInfo.runHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(", ")}`
+                          : `hourly ${autoInfo.startHour ?? 8}:00–${autoInfo.endHour ?? 22}:00`)}
                       {autoInfo.nextRunLabel ? ` · next run ${autoInfo.nextRunLabel}` : ""}
                     </>
                   )}
