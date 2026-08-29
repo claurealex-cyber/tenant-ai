@@ -16,6 +16,8 @@ const cfg = {
   broadcastHour: "9" as string | null,  // textemall_broadcast_hour
   runHours: null as string | null,      // auto_run_hours e.g. "10,16,22"
   monthlyCap: null as string | null,    // textemall.monthly_fire_cap
+  broadcastMethod: null as string | null, // textemall.broadcast_method: null/form | api
+  broadcastMessage: "APPLY: https://x" as string | null, // textemall.broadcast_message
 };
 vi.mock("@tenant-ai/shared", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tenant-ai/shared")>();
@@ -33,6 +35,8 @@ vi.mock("@tenant-ai/shared", async (importOriginal) => {
       if (ns === "zillow" && key === "textemall_group_url") return "https://app.text-em-all.com/contacts/group/1271";
       if (ns === "zillow" && key === "auto_run_hours") return cfg.runHours;
       if (ns === "textemall" && key === "monthly_fire_cap") return cfg.monthlyCap;
+      if (ns === "textemall" && key === "broadcast_method") return cfg.broadcastMethod;
+      if (ns === "textemall" && key === "broadcast_message") return cfg.broadcastMessage;
       return original.resolveConfig(ns, key);
     },
   };
@@ -58,6 +62,8 @@ const mockIris = vi.fn();
 vi.mock("../services/textemall-api.js", () => ({ setGroupViaApi: (...a: unknown[]) => mockIris(...a), groupIdFromUrl: (u: string | null) => (u ? "1271" : null) }));
 const mockTrigger = vi.fn();
 vi.mock("../services/textemall-trigger.js", () => ({ fireTextEmAllTrigger: (...a: unknown[]) => mockTrigger(...a) }));
+const mockBroadcastApi = vi.fn();
+vi.mock("../services/textemall-broadcast-api.js", () => ({ sendBroadcastViaApi: (...a: unknown[]) => mockBroadcastApi(...a) }));
 
 import { runDailyAutomation, getAutoStatus, localDay, localSlot, parseRunHours, STALE_RUNNING_MS } from "../services/zillow-auto.js";
 
@@ -99,11 +105,14 @@ beforeEach(() => {
   cfg.baseline = null;
   cfg.channel = null;
   cfg.broadcastHour = "9";
+  cfg.broadcastMethod = null;
+  cfg.broadcastMessage = "APPLY: https://x";
   mockImport.mockReset().mockResolvedValue(IMPORT_OK);
   mockBatch.mockReset().mockResolvedValue(BATCH_OK);
   mockCsv.mockReset().mockResolvedValue({ count: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: "/tmp/x.csv" });
   mockIris.mockReset().mockResolvedValue({ status: "ok", count: 2, phones: ["+12245550001","+12245550002"] });
   mockTrigger.mockReset().mockResolvedValue({ fired: false, reason: "not_armed", body: "x" });
+  mockBroadcastApi.mockReset().mockResolvedValue({ status: "ok", broadcastId: 1, recipients: 2, sentPhones: [] });
 });
 
 describe("runDailyAutomation gates", () => {
@@ -362,6 +371,49 @@ describe("send_channel branch (Text-Em-All foundation)", () => {
     await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
   });
 
+  it("broadcast_method=api: PARTIAL add → flips ONLY sentPhones leads, unsent lead stays 'new', batch.phones=sentPhones", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api";
+    const stamp = String(Date.now()).slice(-5);
+    const p1 = `+1224970${stamp}`; // this one is reported sent
+    const p2 = `+1224971${stamp}`; // this one's add FAILED — must NOT flip
+    mockCsv.mockResolvedValue({ count: 2, phones: [p1, p2], csv: "x", csvPath: "/tmp/x.csv" });
+    // API reports only p1 actually made it into the broadcast
+    mockBroadcastApi.mockResolvedValue({ status: "ok", broadcastId: 42, recipients: 1, sentPhones: [p1] });
+    const imp = await prisma.zillowImportRun.create({ data: { status: "done" } });
+    const l1 = await prisma.zillowLead.create({ data: { name: "L1", nameKey: `l1${stamp}`, phone: p1, propertyText: "x", status: "new", firstContactAt: new Date(), importRunId: imp.id } });
+    const l2 = await prisma.zillowLead.create({ data: { name: "L2", nameKey: `l2${stamp}`, phone: p2, propertyText: "x", status: "new", firstContactAt: new Date(), importRunId: imp.id } });
+    const now = nextDay(10);
+    const res = await runDailyAutomation({ now });
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).toHaveBeenCalled();
+    expect(mockIris).not.toHaveBeenCalled();   // API path, NOT the group-edit form path
+    expect(mockTrigger).not.toHaveBeenCalled();
+    const batch = await prisma.textEmAllBatch.findFirst({ where: { day: localDay(now) } });
+    expect(batch!.status).toBe("sent");
+    expect(batch!.phones).toEqual([p1]);       // stored phones = actually-sent, not intended
+    const f1 = await prisma.zillowLead.findUnique({ where: { id: l1.id } });
+    const f2 = await prisma.zillowLead.findUnique({ where: { id: l2.id } });
+    expect(f1!.status).toBe("invited");        // sent → flipped
+    expect(f1!.sentVia).toBe("textemall");
+    expect(f2!.status).toBe("new");            // add failed → NOT flipped, retried next run
+    expect(f2!.sentVia).toBeNull();
+    await prisma.zillowLead.deleteMany({ where: { id: { in: [l1.id, l2.id] } } });
+    await prisma.zillowImportRun.deleteMany({ where: { id: imp.id } });
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("broadcast_method=api: needs_login → batch failed, NO flip, NO group-edit", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api";
+    mockBroadcastApi.mockResolvedValue({ status: "needs_login" });
+    const now = nextDay(10);
+    const res = await runDailyAutomation({ now });
+    expect(res.outcome).toBe("needs_login");
+    expect(mockIris).not.toHaveBeenCalled();
+    const batch = await prisma.textEmAllBatch.findFirst({ where: { day: localDay(now) } });
+    expect(batch!.status).toBe("failed");
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
   it("textemall: Iris needs_login → batch failed, NO trigger, NO lead flip", async () => {
     cfg.channel = "textemall"; cfg.broadcastHour = "10";
     mockIris.mockResolvedValue({ status: "needs_login" });
@@ -506,5 +558,20 @@ describe("auto_run_hours (free-tier 3×/day cadence)", () => {
     expect(res.outcome).toBe("ran");
     expect(mockIris).not.toHaveBeenCalled();     // capped BEFORE the Iris GUI work
     expect(mockTrigger).not.toHaveBeenCalled();  // and before any fire
+  });
+
+  it("broadcast_method=api is EXEMPT from the monthly cap (no Zapier → no 100/mo budget to protect)", async () => {
+    cfg.runHours = "10,16,22"; cfg.channel = "textemall"; cfg.monthlyCap = "1"; cfg.broadcastMethod = "api";
+    const base = nextDay(10);
+    // Same seed that blocks the form path at cap 1/1 — must NOT block the API path.
+    await prisma.textEmAllBatch.create({
+      data: { day: localDay(base), slot: `${localDay(base)}T10seedapi`, groupName: "g", phones: ["+1"], count: 1, status: "sent", createdAt: base },
+    });
+    const at16 = new Date(base); at16.setHours(16);
+    const res = await runDailyAutomation({ now: at16, scheduled: true });
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).toHaveBeenCalled(); // API broadcast still fired despite being over cap
+    expect(mockIris).not.toHaveBeenCalled();
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(base) } });
   });
 });
