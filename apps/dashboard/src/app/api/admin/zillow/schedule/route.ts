@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
   if (summary.capWarning && body.acknowledgeCap !== true) {
     return NextResponse.json(
       {
-        error: `${summary.label} on Text-Em-All is ≈ ${summary.monthlyEstimate} broadcasts/month, over the ${monthlyCap}/month cap — broadcasts would stop mid-month. Re-send with acknowledgeCap to save anyway.`,
+        error: `${summary.label} on Text-Em-All is ≈ ${summary.monthlyEstimate} broadcasts/month, over the monthly broadcast cap of ${monthlyCap} — broadcasts would stop mid-month. Re-send with acknowledgeCap to save anyway.`,
         needsAck: true,
         estimate: summary.monthlyEstimate,
         cap: monthlyCap,

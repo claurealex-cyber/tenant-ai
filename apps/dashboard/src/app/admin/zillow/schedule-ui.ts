@@ -29,7 +29,7 @@ export interface Preset {
   recommended?: boolean;
 }
 
-/** Fixed-mode presets; 3×/day is the Zapier-free-tier-safe cadence. */
+/** Fixed-mode presets; 3×/day stays under the monthly broadcast cap (96) in a 31-day month. */
 export const PRESETS: Preset[] = [
   { id: "1x", label: "1×/day", hours: [10] },
   { id: "2x", label: "2×/day", hours: [10, 16] },

@@ -276,3 +276,18 @@ commits by explicit path; stress-tested at each milestone.
 | **M3** editor | `21f1d62` | 7 pure-logic tests; dashboard Zillow suites 35/35; `next build` clean; smoke-served on :3100 (login 200, `/admin/zillow` 307→login). **Bug caught in self-review:** `load`'s stale `useCallback` closure would have wiped unsaved edits on every reload → ref mirror. |
 | **M4** scrape-only hours | — | Not built (optional; owner has not asked). |
 | **M5** docs / deploy | this commit | `zillow-textemall-workflow.md` section; deploy via fast-forward merge into `main` + launchd restart (see below). |
+
+### Live gate result (2026-08-29 17:00)
+- Restart under launchd 16:50 (launcher 87969, server 88184); `auto-status` on the new server:
+  `schedulerOnline: true`, `schedule` block present, `autoHour` = first run hour.
+- Schedule set to `10,16,17,22` via `set-config` + `/internal/config/refresh` at 16:51 → status showed
+  `4×/day … next: 17:00, capWarning: true`. **The 17:00 tick ran at 17:00:00 exactly** (`T17`, `done`,
+  200 found, 0 new) — the edited schedule is honoured live. Restored to `10,16,22` at 17:01:30.
+- **Stale premise found:** the batch went out as `sent` (1 recipient) despite `trigger_armed=false`.
+  Since 2026-08-29 the engine's primary path is `broadcast_method=api` (direct Text-Em-All REST
+  broadcast, no Zapier); `trigger_armed` only gates the Zapier fallback. Recipient was the owner's
+  check number (+1 708 415 8984, always included; 0 new leads) — no prospect was texted. The
+  monthly cap is still checked before both paths, so the editor's guard stays valid; its copy was
+  changed from "Zapier free tier" to "monthly broadcast cap". **A "disarmed" live gate no longer
+  exists on the API path — a scheduled test hour is a real run.**
+- Watchdog: zero output through 17:03 (nothing to report — correct).

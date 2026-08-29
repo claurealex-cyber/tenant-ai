@@ -6,7 +6,9 @@
  * (the engine ticks hourly).
  */
 
-/** Zapier free tier = 100 tasks/month; one Text-Em-All broadcast = 1 task. */
+/** Monthly broadcast cap (textemall.monthly_fire_cap default). Originally the Zapier free tier
+ * (100 tasks/month, 1 broadcast = 1 task); with broadcast_method=api it still caps Text-Em-All
+ * broadcasts per month — the engine checks it before EITHER send path. */
 export const DEFAULT_MONTHLY_FIRE_CAP = 96;
 export const SCHEDULE_TIMEZONE = "America/Chicago";
 
@@ -110,7 +112,7 @@ export interface ScheduleSummary extends ScheduleShape {
   channel: SendChannel;
   monthlyEstimate: number;
   monthlyCap: number;
-  /** Text-Em-All channel and the estimate exceeds the cap → broadcasts will stop mid-month. */
+  /** Text-Em-All channel and the 31-day estimate exceeds the monthly broadcast cap → broadcasts would stop mid-month. */
   capWarning: boolean;
   timezone: string;
 }

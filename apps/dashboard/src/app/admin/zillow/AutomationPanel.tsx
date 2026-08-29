@@ -373,7 +373,7 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
                         title={p.hours.map(fmtHour).join(", ")}
                       >
                         {p.label}
-                        {p.recommended ? " · free-tier safe" : ""}
+                        {p.recommended ? " · under the monthly cap" : ""}
                       </button>
                     ))}
                   </div>
@@ -426,7 +426,7 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
                 {channel === "textemall" && (
                   <span className={sum.capWarning ? "ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800" : "ml-2 text-xs text-gray-500"}>
                     ≈ {sum.monthlyEstimate} broadcasts/month of cap {monthlyCap}
-                    {sum.capWarning ? " — broadcasts would stop mid-month (Zapier free tier)" : ""}
+                    {sum.capWarning ? " — broadcasts would stop mid-month (monthly broadcast cap)" : ""}
                   </span>
                 )}
               </div>
@@ -446,7 +446,7 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
                   disabled={!dirty || savingSchedule || sum.problems.length > 0}
                   className="rounded-md bg-gray-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-900 disabled:opacity-40"
                 >
-                  {savingSchedule ? "Saving…" : ackCap ? "Save anyway (over the free-tier cap)" : "Save schedule"}
+                  {savingSchedule ? "Saving…" : ackCap ? "Save anyway (over the monthly cap)" : "Save schedule"}
                 </button>
                 <button
                   onClick={() => { setDraft(saved); setAckCap(false); }}
