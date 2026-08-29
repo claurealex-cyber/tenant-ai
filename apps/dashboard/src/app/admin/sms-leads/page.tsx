@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import DashboardShell from "@/components/layout/DashboardShell";
+import DeliveryMethodPanel from "@/components/DeliveryMethodPanel";
 
 interface SmsLeadRow {
   key: string;
@@ -130,6 +131,7 @@ export default function SmsLeadsPage() {
           </p>
         </div>
 
+        <DeliveryMethodPanel lane="individual" />
         {error && <div className="mb-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
 
         <div className="mb-2 flex items-center gap-3 text-xs text-gray-500">

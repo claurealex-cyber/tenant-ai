@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import DashboardShell from "@/components/layout/DashboardShell";
 import AutomationPanel from "./AutomationPanel";
+import DeliveryMethodPanel from "@/components/DeliveryMethodPanel";
 
 interface ZillowLead {
   id: string;
@@ -282,6 +283,7 @@ export default function ZillowLeadsPage() {
         </div>
 
         <div className="mb-6">
+          <DeliveryMethodPanel lane="zillow" />
           <AutomationPanel newLeadCount={counts["new"] ?? 0} />
         </div>
 

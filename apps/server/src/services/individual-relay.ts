@@ -8,6 +8,7 @@ import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
 import { sendBroadcastViaApi } from "./textemall-broadcast-api.js";
 import { fireIndividualTrigger } from "./individual-trigger.js";
 import { claimFire, recordFire } from "./fire-ledger.js";
+import { resolveBroadcastMethod } from "./delivery-method.js";
 
 const E164 = /^\+1\d{10}$/;
 
@@ -27,14 +28,26 @@ export type IndividualRelayOutcome =
  * the trigger is ARMED, and (if a test-whitelist is set) the number is on it.
  * Every other case → deliver via relay directly (no enqueue).
  */
-export async function individualTextEmAllEligible(phone: string): Promise<boolean> {
-  if ((await resolveConfig("sms_relay", "individual_channel")) !== "textemall") return false;
-  if ((await resolveConfig("textemall", "individual_trigger_armed")) !== "true") return false;
+export interface IndividualChannelState {
+  on: boolean;        // sms_relay.individual_channel === "textemall"
+  armed: boolean;     // textemall.individual_trigger_armed === "true"
+  whitelist: string[]; // textemall.individual_test_numbers (empty = all callers)
+}
+
+/** Channel-level individual state — the SINGLE source both the eligibility gate
+ *  and the routing-status readout read (M1/P2), so they cannot drift. */
+export async function individualChannelState(): Promise<IndividualChannelState> {
+  const on = (await resolveConfig("sms_relay", "individual_channel")) === "textemall";
+  const armed = (await resolveConfig("textemall", "individual_trigger_armed")) === "true";
   const wl = (await resolveConfig("textemall", "individual_test_numbers"))?.trim();
-  if (wl) {
-    const set = new Set(wl.split(",").map((s) => s.trim()).filter(Boolean));
-    if (!set.has(phone)) return false;
-  }
+  const whitelist = wl ? wl.split(",").map((x) => x.trim()).filter(Boolean) : [];
+  return { on, armed, whitelist };
+}
+
+export async function individualTextEmAllEligible(phone: string): Promise<boolean> {
+  const st = await individualChannelState();
+  if (!st.on || !st.armed) return false;
+  if (st.whitelist.length && !st.whitelist.includes(phone)) return false;
   return true;
 }
 
@@ -102,7 +115,7 @@ export async function runIndividualRelay(
   // broadcast_method="api": send the broadcast DIRECTLY to [caller, owner] by phone
   // (no group edit → no 422 existing-contact bug, no Zapier). Records the fire for
   // the cooldown. "form" (default) → the group-edit + individual Google-Form trigger.
-  if ((await resolveConfig("textemall", "broadcast_method")) === "api") {
+  if ((await resolveBroadcastMethod("individual")) === "api") {
     const message = (await resolveConfig("textemall", "broadcast_message")) ??
       "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
     const bc = await withGuiLock("individual-relay", () => sendBroadcastViaApi({ phones, message }));

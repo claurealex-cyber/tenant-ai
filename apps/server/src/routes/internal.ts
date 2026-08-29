@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { resolveConfig, clearConfigCache } from "@tenant-ai/shared";
+import { resolveRoutingStatus } from "../services/routing-status.js";
 import { relaySendWithGuards } from "../services/relay-guards.js";
 import { prisma } from "../lib/prisma.js";
 import { runZillowImport, leadsToCsv } from "../services/zillow-import.js";
@@ -162,6 +163,15 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
     { preHandler: requireInternalSecret },
     async (_request, reply: FastifyReply) => {
       return reply.send(await getAutoStatus());
+    },
+  );
+
+  /** GET /internal/routing-status — effective delivery path per lane (M1). */
+  server.get(
+    "/internal/routing-status",
+    { preHandler: requireInternalSecret },
+    async (_request, reply: FastifyReply) => {
+      return reply.send(await resolveRoutingStatus());
     },
   );
 

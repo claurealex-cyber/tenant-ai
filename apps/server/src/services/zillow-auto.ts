@@ -6,6 +6,7 @@ import { sendSurveyBatch } from "./zillow-send.js";
 import { buildTextEmAllCsv } from "./textemall-csv.js";
 import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
 import { sendBroadcastViaApi } from "./textemall-broadcast-api.js";
+import { resolveBroadcastMethod } from "./delivery-method.js";
 import { fireTextEmAllTrigger } from "./textemall-trigger.js";
 import { withGuiLock } from "../lib/gui-lock.js";
 
@@ -263,7 +264,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // The monthly cap protects the Zapier FREE-TIER 100-task budget — it applies
       // ONLY to the Google-Form → Zapier path. The direct-API broadcast uses no
       // Zapier, so it is exempt (Text-Em-All credits are the only cost there).
-      const apiMode = (await resolveConfig("textemall", "broadcast_method")) === "api";
+      const apiMode = (await resolveBroadcastMethod("zillow")) === "api";
       if (!apiMode) {
         const monthCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), DEFAULT_MONTHLY_FIRE_CAP);
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -300,7 +301,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // Text-Em-All REST API (recipients by phone; no group, no Google Form, no
       // Zapier, no 100/mo cap, and no existing-contact 422 bug). "form" (default)
       // preserves the group-edit + Google-Form → Zap path.
-      if ((await resolveConfig("textemall", "broadcast_method")) === "api") {
+      if (apiMode) {
         const message = (await resolveConfig("textemall", "broadcast_message")) ??
           "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
         const bc = await withGuiLock("textemall-api", () => sendBroadcastViaApi({ phones: csv.phones, message }));

@@ -1,4 +1,17 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+
+// Isolate lead-SELECTION from the always-include-owner HEARTBEAT: default the
+// owner number OFF so count/opt-out/sent-batch assertions test pure lead logic.
+// One test flips it on to cover the real heartbeat default.
+let testAlwaysInclude = "";
+vi.mock("@tenant-ai/shared", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tenant-ai/shared")>();
+  return {
+    ...actual,
+    resolveConfig: async (ns: string, k: string) =>
+      ns === "textemall" && k === "always_include_phone" ? testAlwaysInclude : actual.resolveConfig(ns, k),
+  };
+});
 import bcrypt from "bcrypt";
 import { PrismaClient } from "@prisma/client";
 import { buildTextEmAllCsv } from "../services/textemall-csv.js";
@@ -43,6 +56,7 @@ beforeEach(async () => {
 });
 
 describe("buildTextEmAllCsv", () => {
+  beforeEach(() => { testAlwaysInclude = ""; });
   it("includes eligible new leads with a single Name column", async () => {
     const a = await lead();
     const r = await onlyOurs();
@@ -81,6 +95,21 @@ describe("buildTextEmAllCsv", () => {
     const r = await buildTextEmAllCsv({ propertyId, write: true });
     expect(r.count).toBe(0);
     expect(r.csvPath).toBeNull();
+  });
+
+  it("always_include_phone set → empty leads still emit an owner heartbeat row (count 1)", async () => {
+    testAlwaysInclude = "+17084158984";
+    const r = await buildTextEmAllCsv({ propertyId, write: false });
+    expect(r.count).toBe(1);
+    expect(r.phones).toEqual(["+17084158984"]);
+    expect(r.csv).toContain("Owner Check,+17084158984");
+  });
+
+  it("always_include_phone is de-duped against a lead with the same number", async () => {
+    testAlwaysInclude = "+17084158984";
+    await lead({ phone: "+17084158984", nameKey: `${P}owner` });
+    const r = await onlyOurs();
+    expect(r.phones.filter((x) => x === "+17084158984")).toHaveLength(1);
   });
 
   it("dedupes a phone that appears twice in the lead set", async () => {

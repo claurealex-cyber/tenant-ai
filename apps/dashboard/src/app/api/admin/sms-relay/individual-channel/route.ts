@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { encrypt, resolveConfig, clearConfigCache } from "@tenant-ai/shared";
+import { proxyToServer } from "@/lib/zillow-admin";
 
 async function setCfg(key: string, value: string, userId: string) {
   await prisma.systemConfig.upsert({
@@ -52,5 +53,6 @@ export async function POST(request: NextRequest) {
     data: { userId, action: "individual_channel_update", resourceType: "system_config", resourceId: "sms_relay.individual_channel", metadata: { channel: body.channel, armed: body.armed } },
   }).catch(() => {});
   clearConfigCache();
+  try { await proxyToServer("/internal/config/refresh", { method: "POST", timeoutMs: 4000 }); } catch { /* best-effort */ }
   return NextResponse.json({ ok: true });
 }

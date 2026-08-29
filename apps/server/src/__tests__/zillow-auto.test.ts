@@ -16,7 +16,8 @@ const cfg = {
   broadcastHour: "9" as string | null,  // textemall_broadcast_hour
   runHours: null as string | null,      // auto_run_hours e.g. "10,16,22"
   monthlyCap: null as string | null,    // textemall.monthly_fire_cap
-  broadcastMethod: null as string | null, // textemall.broadcast_method: null/form | api
+  broadcastMethod: null as string | null, // zillow.broadcast_method (lane): null/form | api
+  legacyBroadcastMethod: null as string | null, // textemall.broadcast_method (legacy global fallback)
   broadcastMessage: "APPLY: https://x" as string | null, // textemall.broadcast_message
 };
 vi.mock("@tenant-ai/shared", async (importOriginal) => {
@@ -35,7 +36,8 @@ vi.mock("@tenant-ai/shared", async (importOriginal) => {
       if (ns === "zillow" && key === "textemall_group_url") return "https://app.text-em-all.com/contacts/group/1271";
       if (ns === "zillow" && key === "auto_run_hours") return cfg.runHours;
       if (ns === "textemall" && key === "monthly_fire_cap") return cfg.monthlyCap;
-      if (ns === "textemall" && key === "broadcast_method") return cfg.broadcastMethod;
+      if (ns === "zillow" && key === "broadcast_method") return cfg.broadcastMethod;
+      if (ns === "textemall" && key === "broadcast_method") return cfg.legacyBroadcastMethod;
       if (ns === "textemall" && key === "broadcast_message") return cfg.broadcastMessage;
       return original.resolveConfig(ns, key);
     },
@@ -106,6 +108,7 @@ beforeEach(() => {
   cfg.channel = null;
   cfg.broadcastHour = "9";
   cfg.broadcastMethod = null;
+  cfg.legacyBroadcastMethod = null;
   cfg.broadcastMessage = "APPLY: https://x";
   mockImport.mockReset().mockResolvedValue(IMPORT_OK);
   mockBatch.mockReset().mockResolvedValue(BATCH_OK);
@@ -399,6 +402,30 @@ describe("send_channel branch (Text-Em-All foundation)", () => {
     expect(f2!.sentVia).toBeNull();
     await prisma.zillowLead.deleteMany({ where: { id: { in: [l1.id, l2.id] } } });
     await prisma.zillowImportRun.deleteMany({ where: { id: imp.id } });
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("M0 legacy fallback: no zillow.broadcast_method but legacy textemall.broadcast_method=api → API path", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10";
+    cfg.broadcastMethod = null;          // lane key ABSENT
+    cfg.legacyBroadcastMethod = "api";   // legacy global set → both lanes inherit
+    const now = nextDay(10);
+    const res = await runDailyAutomation({ now });
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).toHaveBeenCalled(); // fell back to legacy → API path
+    expect(mockIris).not.toHaveBeenCalled();
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("M0 lane override wins over legacy: lane=form beats legacy=api → form path", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10";
+    cfg.broadcastMethod = "form";        // explicit lane value
+    cfg.legacyBroadcastMethod = "api";   // legacy would say api, but lane wins
+    const now = nextDay(10);
+    const res = await runDailyAutomation({ now });
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).not.toHaveBeenCalled(); // lane=form → NOT the API path
+    expect(mockIris).toHaveBeenCalled();             // group-edit form path instead
     await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
   });
 

@@ -18,6 +18,8 @@ vi.mock("../handlers/survey-intake.js", () => ({
   buildIntakeReply: () => "Apply here: https://x/apply",
 }));
 vi.mock("../routes/telnyx-sms.js", () => ({ rewriteForRelay: (t: string) => t }));
+const mockBroadcast = vi.fn();
+vi.mock("../services/textemall-broadcast-api.js", () => ({ sendBroadcastViaApi: (...a: unknown[]) => mockBroadcast(...a) }));
 
 import { runIndividualRelay, individualTextEmAllEligible } from "../services/individual-relay.js";
 const prisma = new PrismaClient();
@@ -32,6 +34,9 @@ const MONTH = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).p
 
 beforeEach(async () => {
   okEdit.mockClear(); fireOk.mockClear(); relayOk.mockClear();
+  mockBroadcast.mockReset().mockResolvedValue({ status: "ok", broadcastId: 1, recipients: 2, sentPhones: [PHONE, "+17084158984"] });
+  delete cfg["sms_relay.broadcast_method"]; delete cfg["textemall.broadcast_method"];
+  cfg["sms_relay.individual_channel"] = "textemall"; cfg["textemall.individual_trigger_armed"] = "true";
   cfg["textemall.monthly_fire_cap"] = "100";
   await prisma.textEmAllFire.deleteMany({ where: { ref: PHONE } });
   await prisma.smsOptOut.deleteMany({ where: { phone: PHONE } });
@@ -93,6 +98,51 @@ describe("runIndividualRelay — R1 truth table", () => {
     const r = await runIndividualRelay({ propertyId: id, callerPhone: PHONE, source: "x" }, deps);
     expect(r).toMatchObject({ via: "skipped", reason: "cooldown" });
     expect(fireOk).not.toHaveBeenCalled();
+  });
+});
+
+describe("M8 call-path: broadcast_method=api routes CALLS through sendBroadcastViaApi", () => {
+  for (const source of ["call_start", "voice_tool", "call_end"] as const) {
+    it(`source=${source} + api → sendBroadcastViaApi (no group-edit, no bare relay)`, async () => {
+      const id = propId || (await mkProp());
+      cfg["sms_relay.broadcast_method"] = "api";
+      const r = await runIndividualRelay({ propertyId: id, callerPhone: PHONE, source }, deps);
+      expect(r).toEqual({ via: "textemall", status: 200 });
+      expect(mockBroadcast).toHaveBeenCalledOnce();
+      // caller AND owner-check both go in the broadcast
+      const arg = mockBroadcast.mock.calls[0][0] as { phones: string[] };
+      expect(arg.phones).toContain(PHONE);
+      expect(arg.phones).toContain("+17084158984");
+      expect(okEdit).not.toHaveBeenCalled(); // NOT the group-edit form path
+      expect(fireOk).not.toHaveBeenCalled();
+      expect(relayOk).not.toHaveBeenCalled(); // API success → no iMessage
+    });
+  }
+
+  it("api send FAILS (needs_login) → iMessage relay fallback (guaranteed delivery)", async () => {
+    const id = propId || (await mkProp());
+    cfg["sms_relay.broadcast_method"] = "api";
+    mockBroadcast.mockResolvedValue({ status: "needs_login" });
+    const r = await runIndividualRelay({ propertyId: id, callerPhone: PHONE, source: "call_start" }, deps);
+    expect(r.via).toBe("relay-fallback");
+    expect(relayOk).toHaveBeenCalledOnce();
+  });
+
+  it("api ok but CALLER not in sentPhones (only owner added) → relay fallback", async () => {
+    const id = propId || (await mkProp());
+    cfg["sms_relay.broadcast_method"] = "api";
+    mockBroadcast.mockResolvedValue({ status: "ok", broadcastId: 2, recipients: 1, sentPhones: ["+17084158984"] });
+    const r = await runIndividualRelay({ propertyId: id, callerPhone: PHONE, source: "voice_tool" }, deps);
+    expect(r.via).toBe("relay-fallback");
+    expect(relayOk).toHaveBeenCalledOnce();
+  });
+
+  it("api lane is INDEPENDENT: sms_relay.broadcast_method unset + legacy global=api still uses api", async () => {
+    const id = propId || (await mkProp());
+    cfg["textemall.broadcast_method"] = "api"; // legacy fallback only
+    const r = await runIndividualRelay({ propertyId: id, callerPhone: PHONE, source: "call_end" }, deps);
+    expect(r).toEqual({ via: "textemall", status: 200 });
+    expect(mockBroadcast).toHaveBeenCalledOnce();
   });
 });
 
