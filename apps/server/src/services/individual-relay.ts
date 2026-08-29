@@ -7,7 +7,7 @@ import { rewriteForRelay } from "../routes/telnyx-sms.js";
 import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
 import { sendBroadcastViaApi } from "./textemall-broadcast-api.js";
 import { fireIndividualTrigger } from "./individual-trigger.js";
-import { claimFire } from "./fire-ledger.js";
+import { claimFire, recordFire } from "./fire-ledger.js";
 
 const E164 = /^\+1\d{10}$/;
 
@@ -112,7 +112,7 @@ export async function runIndividualRelay(
     const callerDigits = phone.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
     const sent = new Set(bc.sentPhones.map((p) => p.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")));
     if (!sent.has(callerDigits)) return doRelay("caller not in broadcast");
-    await claimFire("individual", { ref: phone, now }).catch(() => {});
+    await recordFire("individual", { ref: phone, now }).catch(() => {}); // cooldown only; no Zapier cap on the API path
     return { via: "textemall", status: 200 };
   }
 

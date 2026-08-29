@@ -32,3 +32,15 @@ export async function claimFire(
 export async function fireCount(now = new Date()): Promise<number> {
   return prisma.textEmAllFire.count({ where: { month: fireMonth(now) } });
 }
+
+/**
+ * Record a fire WITHOUT enforcing the monthly cap. Used by the direct-API
+ * broadcast path (no Zapier → no cap) so the per-phone cooldown still works.
+ */
+export async function recordFire(
+  path: "zillow" | "individual",
+  opts: { ref?: string; now?: Date } = {},
+): Promise<void> {
+  const now = opts.now ?? new Date();
+  await prisma.textEmAllFire.create({ data: { month: fireMonth(now), path, ref: opts.ref ?? null } });
+}

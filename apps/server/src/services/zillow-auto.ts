@@ -260,16 +260,22 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // month; refuse to fire beyond the cap so a stray month can't blow past 100
       // Zapier tasks. Checked BEFORE the Iris GUI work so we don't delete/upload
       // for a fire we won't make.
-      const monthCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), DEFAULT_MONTHLY_FIRE_CAP);
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-      const sentThisMonth = await prisma.textEmAllBatch.count({
-        where: { status: "sent", createdAt: { gte: monthStart, lt: nextMonth } },
-      });
-      if (sentThisMonth >= monthCap && !force) {
-        console.warn(`[zillow-auto] textemall: monthly fire cap reached (${sentThisMonth}/${monthCap}) — NOT broadcasting. Raise textemall.monthly_fire_cap to override.`);
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
-        return { outcome: "ran", run: toRunSummary(row) };
+      // The monthly cap protects the Zapier FREE-TIER 100-task budget — it applies
+      // ONLY to the Google-Form → Zapier path. The direct-API broadcast uses no
+      // Zapier, so it is exempt (Text-Em-All credits are the only cost there).
+      const apiMode = (await resolveConfig("textemall", "broadcast_method")) === "api";
+      if (!apiMode) {
+        const monthCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), DEFAULT_MONTHLY_FIRE_CAP);
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        const sentThisMonth = await prisma.textEmAllBatch.count({
+          where: { status: "sent", createdAt: { gte: monthStart, lt: nextMonth } },
+        });
+        if (sentThisMonth >= monthCap && !force) {
+          console.warn(`[zillow-auto] textemall: monthly fire cap reached (${sentThisMonth}/${monthCap}) — NOT broadcasting. Raise textemall.monthly_fire_cap to override.`);
+          const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+          return { outcome: "ran", run: toRunSummary(row) };
+        }
       }
       const csv = await buildTextEmAllCsv({ baseline: baseline ?? undefined });
       if (csv.count === 0 || !csv.csvPath) {
