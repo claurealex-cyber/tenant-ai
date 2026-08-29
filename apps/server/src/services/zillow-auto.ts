@@ -44,6 +44,8 @@ export interface AutoRunResult {
     | "not_in_window"; // before auto_hour (scheduled path only)
   run?: {
     day: string;
+    /** Hour slot "YYYY-MM-DDTHH" (server-local); null only for pre-slot legacy rows. */
+    slot: string | null;
     status: string;
     attempts: number;
     leadsFound: number;
@@ -82,7 +84,8 @@ export function parseRunHours(raw: string | null | undefined): number[] | null {
   return hours.length ? hours : null;
 }
 
-async function autoConfig() {
+/** The effective automation config (exported for the watchdog; same reads the engine uses). */
+export async function autoConfig() {
   const enabled = (await resolveConfig("zillow", "auto_enabled")) === "true";
   // Window [startHour, endHour] inclusive. auto_hour is the legacy single-hour
   // start; auto_start_hour/auto_end_hour define the hourly window (default 8–22).
@@ -164,6 +167,7 @@ async function finishRow(
 
 function toRunSummary(row: {
   day: string;
+  slot?: string | null;
   status: string;
   attempts: number;
   leadsFound: number;
@@ -173,7 +177,7 @@ function toRunSummary(row: {
   error: string | null;
 }): AutoRunResult["run"] {
   const { day, status, attempts, leadsFound, leadsNew, queuedSends, sentImmediate, error } = row;
-  return { day, status, attempts, leadsFound, leadsNew, queuedSends, sentImmediate, error };
+  return { day, slot: row.slot ?? null, status, attempts, leadsFound, leadsNew, queuedSends, sentImmediate, error };
 }
 
 export interface RunOptions {
@@ -413,7 +417,8 @@ export async function getAutoStatus(now = new Date()): Promise<AutoStatus> {
 
   return {
     enabled,
-    autoHour: startHour,
+    // "The day's first scheduled hour" — first fixed run hour, else the window start.
+    autoHour: runHours ? runHours[0] : startHour,
     startHour,
     endHour,
     runHours,

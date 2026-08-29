@@ -22,8 +22,30 @@ interface RegisteredJob {
   definition: JobDefinition;
   queue: Queue;
   worker: Worker;
+  registeredAt: Date;
   lastRunAt: Date | null;
   lastError: string | null;
+}
+
+/** Observable state of a registered job (for watchdogs / status endpoints). */
+export interface JobState {
+  registered: boolean;
+  registeredAt: Date | null;
+  lastRunAt: Date | null;
+  lastError: string | null;
+}
+
+/**
+ * Read-only view of a job's registration + last-run state. `registered: false`
+ * means registerJob() never completed for this name (typically Redis was
+ * unavailable at boot — index.ts logs and continues, so the server is up but
+ * this job will never tick until a restart with Redis up).
+ */
+export function getJobState(name: string): JobState {
+  const e = registry.get(name);
+  return e
+    ? { registered: true, registeredAt: e.registeredAt, lastRunAt: e.lastRunAt, lastError: e.lastError }
+    : { registered: false, registeredAt: null, lastRunAt: null, lastError: null };
 }
 
 // ── Scheduler ──
@@ -98,6 +120,7 @@ export async function registerJob(definition: JobDefinition): Promise<void> {
     definition,
     queue,
     worker,
+    registeredAt: new Date(),
     lastRunAt: null,
     lastError: null,
   });

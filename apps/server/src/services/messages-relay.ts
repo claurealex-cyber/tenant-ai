@@ -73,11 +73,11 @@ export function sendViaMessagesRelay(to: string, text: string): Promise<void> {
   });
 }
 
-/** Best-effort local notification so a TCC revocation is visible on the Mac. */
-export function notifyOnMac(text: string): void {
+/** Best-effort local macOS notification (relay TCC revocations, Zillow watchdog, …). */
+export function notifyOnMac(text: string, title = "Tenant AI relay"): void {
   execFile(
     "/usr/bin/osascript",
-    ["-e", `display notification ${aplString(text)} with title "Tenant AI relay"`],
+    ["-e", `display notification ${aplString(text)} with title ${aplString(title)}`],
     { timeout: 5_000 },
     () => {},
   );

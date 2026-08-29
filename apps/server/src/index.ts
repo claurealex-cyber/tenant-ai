@@ -14,6 +14,7 @@ import { surveyRoutes } from "./routes/survey.js";
 import { ownerRoutes } from "./routes/owner.js";
 import { internalRoutes } from "./routes/internal.js";
 import { startRelaySweep } from "./services/relay-guards.js";
+import { startZillowWatchdog } from "./services/zillow-watchdog.js";
 import { registerJob } from "./jobs/scheduler.js";
 import { billingCycleJob } from "./jobs/billing-cycle.js";
 import { rentPostingJob } from "./jobs/rent-posting.js";
@@ -82,6 +83,9 @@ try {
 // SMS relay sweep — plain setInterval (Prisma only, no Redis dependency):
 // retries/drains the send ledger, daily heartbeat, webhook-dedupe pruning.
 startRelaySweep((msg) => server.log.info(msg));
+// Zillow watchdog — also a plain setInterval (deliberately NOT BullMQ: it must
+// keep reporting when Redis is down, which is exactly when the tick is dead).
+startZillowWatchdog((msg) => server.log.warn(msg));
 
 // Background jobs — registered AFTER listen so a hung Redis connection can
 // never block the webhook endpoint from coming up. Each registration races a

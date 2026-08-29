@@ -10,18 +10,25 @@ nothing.
   `dev.iris.cron.<id>` + a logging wrapper in `~/.iris/cron/`). The `--script` job type was
   added for this: the wrapper runs a shell script directly — no `iris -p`, no API keys copied
   into the wrapper.
-- The job runs `scripts/zillow-supervise.sh` daily at **09:30** (after the server engine's
-  09:00 window opens). The wrapper's convention: stdout `all clear` → silent; any other
-  output → `osascript display notification` with that text.
+- The job runs `scripts/zillow-supervise.sh` daily at **09:30**. The wrapper's convention: stdout
+  `all clear…` → silent; any other output → `osascript display notification` with that text.
 - `zillow-supervise.sh` finds the live API port (3005/3001/3006…), then runs
-  `apps/server/scripts/zillow-auto-supervise.ts`, which:
-  1. reads `/internal/zillow/auto-status` (secret resolved in-process, direct HTTP — works
-     even when Redis/BullMQ is down);
+  `apps/server/scripts/zillow-auto-supervise.ts`, which is **liveness + digest only** (rev. 2026-08-29):
+  1. reads `/internal/zillow/auto-status` (secret resolved in-process, direct HTTP — works even
+     when Redis/BullMQ is down); unreachable → notify;
   2. automation off → prints `all clear (automation off)`;
-  3. today's run missing or unhealed after the window → POSTs `/internal/zillow/auto-run`
-     (no force — race-safe against the hourly engine via the day-claim) and re-checks;
-  4. notifies on: `needs_login` (Safari session expired), `failed`, missing run that could
-     not be triggered, server unreachable, or queued survey texts older than 3 days.
+  3. summarises **yesterday per scheduled slot** (fixed run hours, or every hour of the hourly
+     window): missed / failed / needs_login, plus "scheduler OFFLINE" if the hourly tick is dead,
+     today's `needs_login`/`failed`, and queued survey texts older than 3 days;
+  4. **never triggers a run.** The old `POST /internal/zillow/auto-run` bypassed the run-hours
+     gate and produced an unscheduled 09:30 run on 2026-08-28 (a 203-contact batch that only
+     failed at upload). Missed slots are accepted — no catch-up (decided 2026-08-27).
+- In-hour reporting is done by the **in-process watchdog** (`src/services/zillow-watchdog.ts`,
+  a plain `setInterval` like the relay sweep — deliberately not BullMQ, so it still reports when
+  Redis is down): after each scheduled hour has fully passed (+5 min) it notifies on the Mac about
+  a run that did not happen / failed / crashed / needs login, collapses consecutive misses into one
+  notification, and reports the scheduler going offline/online. Decision logic is pure and tested
+  (`zillow-watchdog.test.ts`, `zillow-supervisor-report.test.ts`).
 
 ## Install (reproduce)
 
