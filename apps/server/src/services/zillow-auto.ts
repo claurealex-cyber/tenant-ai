@@ -5,6 +5,7 @@ import { runZillowImport } from "./zillow-import.js";
 import { sendSurveyBatch } from "./zillow-send.js";
 import { buildTextEmAllCsv } from "./textemall-csv.js";
 import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
+import { sendBroadcastViaApi } from "./textemall-broadcast-api.js";
 import { fireTextEmAllTrigger } from "./textemall-trigger.js";
 import { withGuiLock } from "../lib/gui-lock.js";
 
@@ -288,6 +289,31 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // trigger → stamp batch SENT before flipping leads. DETERMINISTIC path —
       // sets the group via the Text-Em-All REST API (authenticated XHR in the
       // logged-in Safari tab), NOT the fragile iris GUI drive. Seconds, not minutes.
+
+      // broadcast_method toggle: "api" sends the broadcast DIRECTLY via the
+      // Text-Em-All REST API (recipients by phone; no group, no Google Form, no
+      // Zapier, no 100/mo cap, and no existing-contact 422 bug). "form" (default)
+      // preserves the group-edit + Google-Form → Zap path.
+      if ((await resolveConfig("textemall", "broadcast_method")) === "api") {
+        const message = (await resolveConfig("textemall", "broadcast_message")) ??
+          "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
+        const bc = await withGuiLock("textemall-api", () => sendBroadcastViaApi({ phones: csv.phones, message }));
+        if (bc.status !== "ok") {
+          const detail = bc.status === "needs_login" ? "needs-login" : (bc as { detail?: string }).detail ?? "failed";
+          await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "failed", error: `broadcast ${bc.status}: ${detail}`.slice(0, 500) } });
+          const row = await finishRow(claim, bc.status === "needs_login" ? "needs_login" : "failed", { error: `textemall broadcast ${bc.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+          return { outcome: bc.status === "needs_login" ? "needs_login" : "failed", run: toRunSummary(row) };
+        }
+        await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "sent" } });
+        await prisma.zillowLead.updateMany({
+          where: { phone: { in: csv.phones }, status: "new" },
+          data: { status: "invited", sentVia: "textemall", sentBatchId: batchRow.id },
+        }).catch((e) => console.error("textemall lead flip failed (broadcast already sent, safe):", e));
+        console.log(`[zillow-auto] textemall API broadcast ${bc.broadcastId} → ${bc.recipients} recipient(s).`);
+        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: bc.recipients, sentDelta: bc.recipients });
+        return { outcome: "ran", run: toRunSummary(row) };
+      }
+
       const groupId = groupIdFromUrl(groupUrl);
       const upload = groupId
         ? await withGuiLock("textemall-api", () => setGroupViaApi({ groupId, phones: csv.phones }))

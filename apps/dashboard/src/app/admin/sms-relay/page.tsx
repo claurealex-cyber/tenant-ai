@@ -51,6 +51,7 @@ export default function SmsRelayPage() {
   const [optOutPhone, setOptOutPhone] = useState("");
   const [autoReplyDrafts, setAutoReplyDrafts] = useState<Record<string, string>>({});
   const [individual, setIndividual] = useState<{ channel: "relay" | "textemall"; armed: boolean; testNumbers: string; group: string } | null>(null);
+  const [broadcastMethod, setBroadcastMethod] = useState<"api" | "form" | null>(null);
   const [testNumbersDraft, setTestNumbersDraft] = useState("");
 
   const load = useCallback(async () => {
@@ -64,6 +65,7 @@ export default function SmsRelayPage() {
       if (indRes.ok) {
         const ind = await indRes.json();
         setIndividual(ind);
+        try { const bm = await (await fetch("/api/admin/sms-relay/broadcast-method")).json(); setBroadcastMethod(bm.method); } catch {}
         setTestNumbersDraft(ind.testNumbers || "");
       }
       if (intRes.ok) {
@@ -163,6 +165,19 @@ export default function SmsRelayPage() {
     } catch {
       setBanner({ kind: "err", text: "Could not change reply style" });
     }
+  };
+
+  const updateBroadcastMethod = async (method: "api" | "form") => {
+    setBanner(null);
+    try {
+      const res = await fetch("/api/admin/sms-relay/broadcast-method", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method }),
+      });
+      if (!res.ok) { setBanner({ kind: "err", text: "Could not change broadcast method" }); return; }
+      await fetch("/api/admin/sms-relay/refresh-config", { method: "POST" }).catch(() => {});
+      setBroadcastMethod(method);
+      setBanner({ kind: "ok", text: method === "api" ? "Broadcasts now via direct Text-Em-All API (no Zapier)" : "Broadcasts now via Google Form → Zapier" });
+    } catch { setBanner({ kind: "err", text: "Could not change broadcast method" }); }
   };
 
   const updateIndividual = async (patch: { channel?: "relay" | "textemall"; armed?: boolean; testNumbers?: string }) => {
@@ -361,6 +376,35 @@ export default function SmsRelayPage() {
                   {status.intake.style === "link_and_qa" && typeof status.qaToday === "number" && (
                     <p className="mt-1 text-xs text-gray-500">Q&amp;A replies today: {status.qaToday}</p>
                   )}
+                </div>
+              )}
+              {/* Text-Em-All broadcast method — Google Form/Zapier vs direct REST API */}
+              {broadcastMethod && (
+                <div className="mt-4 border-t border-gray-100 pt-4" data-testid="broadcast-method">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-gray-500">Text-Em-All broadcast method:</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-gray-300">
+                      <button
+                        type="button"
+                        onClick={() => updateBroadcastMethod("form")}
+                        className={`px-3 py-1 text-xs font-medium ${broadcastMethod === "form" ? "bg-blue-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
+                      >
+                        Google Form → Zapier
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateBroadcastMethod("api")}
+                        className={`border-l border-gray-300 px-3 py-1 text-xs font-medium ${broadcastMethod === "api" ? "bg-blue-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"}`}
+                      >
+                        Direct API
+                      </button>
+                    </div>
+                    <span className="text-xs text-gray-400">
+                      {broadcastMethod === "api"
+                        ? "Sends directly (no Zapier, no 100/mo cap, targets numbers) — applies to Zillow + caller/text"
+                        : "Uses the Google Form → Zapier path"}
+                    </span>
+                  </div>
                 </div>
               )}
               {/* Individual link delivery — relay (default) vs Text-Em-All (opt-in, disarmed) */}

@@ -5,6 +5,7 @@ import { resolveSurveyLink, buildIntakeReply } from "../handlers/survey-intake.j
 import { relaySendWithGuards } from "./relay-guards.js";
 import { rewriteForRelay } from "../routes/telnyx-sms.js";
 import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
+import { sendBroadcastViaApi } from "./textemall-broadcast-api.js";
 import { fireIndividualTrigger } from "./individual-trigger.js";
 import { claimFire } from "./fire-ledger.js";
 
@@ -92,13 +93,26 @@ export async function runIndividualRelay(
     return { via: "relay-fallback", reason };
   };
 
-  // Attempt Text-Em-All: GUI-locked group edit → verify → cap → fire.
-  if (!groupId) return doRelay("no individual_group_url configured");
   // Always include the owner's check number (owner: text me every time it texts an
   // individual) so the owner gets a copy of every caller's link as a live delivery check.
   const ownerCheck = ((await resolveConfig("textemall", "always_include_phone")) ?? "+17084158984").trim();
   const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   const phones = ownerCheck && digits(ownerCheck) !== digits(phone) ? [phone, ownerCheck] : [phone];
+
+  // broadcast_method="api": send the broadcast DIRECTLY to [caller, owner] by phone
+  // (no group edit → no 422 existing-contact bug, no Zapier). Records the fire for
+  // the cooldown. "form" (default) → the group-edit + individual Google-Form trigger.
+  if ((await resolveConfig("textemall", "broadcast_method")) === "api") {
+    const message = (await resolveConfig("textemall", "broadcast_message")) ??
+      "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
+    const bc = await withGuiLock("individual-relay", () => sendBroadcastViaApi({ phones, message }));
+    if (bc.status !== "ok") return doRelay(`broadcast ${bc.status}`);
+    await claimFire("individual", { ref: phone, now }).catch(() => {});
+    return { via: "textemall", status: 200 };
+  }
+
+  // Attempt Text-Em-All (form path): GUI-locked group edit → verify → cap → fire.
+  if (!groupId) return doRelay("no individual_group_url configured");
   const edit = await withGuiLock("individual-relay", () => setGroup({ groupId, phones }));
   if (edit.status !== "ok") return doRelay(`group-set ${edit.status}`);
 
