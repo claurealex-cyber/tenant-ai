@@ -7,10 +7,9 @@ import { encrypt } from "@tenant-ai/shared";
 /**
  * POST { enabled, baselineMode? }: flip the automation on/off.
  *
- * Dashboard-local by design — SystemConfig values are encrypted at rest, and
- * this is the only writer (encrypt + audit + cache-clear), matching the
- * integrations PUT machinery. The server process picks the change up within
- * its ~60s config-cache TTL; "Run now" uses force and doesn't wait.
+ * Dashboard-local by design — SystemConfig values are encrypted at rest
+ * (encrypt + audit + cache-clear in both processes, matching the integrations
+ * PUT machinery). The schedule itself is written only by /api/admin/zillow/schedule.
  *
  * baselineMode (only meaningful when enabling):
  *  - "today" (default): auto-send only leads discovered from today on
@@ -33,19 +32,11 @@ export async function POST(request: NextRequest) {
     const baselineMode = body.baselineMode === "all" ? "all" : "new";
     const resetBaseline = body.resetBaseline === true;
 
-    const clampHour = (v: unknown, def: number) =>
-      Math.min(23, Math.max(0, parseInt(String(v), 10) || def));
-
     const writes: Array<{ key: string; value: string }> = [
       { key: "zillow.auto_enabled", value: body.enabled ? "true" : "false" },
     ];
-    // Optional hourly window (8am–10pm by default). Accepted on any call.
-    if (body.startHour !== undefined) {
-      writes.push({ key: "zillow.auto_start_hour", value: String(clampHour(body.startHour, 8)) });
-    }
-    if (body.endHour !== undefined) {
-      writes.push({ key: "zillow.auto_end_hour", value: String(clampHour(body.endHour, 22)) });
-    }
+    // The schedule (run hours / hourly window / broadcast hour) has ONE writer:
+    // POST /api/admin/zillow/schedule. This route only flips the flag + baseline.
     if (body.enabled) {
       if (baselineMode === "all") {
         // Explicit backlog blast: baseline = epoch (text everything, subject to caps).
@@ -83,7 +74,14 @@ export async function POST(request: NextRequest) {
     });
 
     const { clearConfigCache } = await import("@tenant-ai/shared");
-    clearConfigCache();
+    clearConfigCache(); // dashboard process
+    // Make it live in the server process immediately (its 60 s TTL is the fallback).
+    try {
+      const { proxyToServer } = await import("@/lib/zillow-admin");
+      await proxyToServer("/internal/config/refresh", { method: "POST", timeoutMs: 4000 });
+    } catch {
+      /* best-effort */
+    }
 
     return NextResponse.json({ success: true, enabled: body.enabled });
   } catch (error) {
