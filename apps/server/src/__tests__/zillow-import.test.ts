@@ -80,6 +80,27 @@ describe("parseZillowLead", () => {
     expect(lead!.firstContactAt).toEqual(new Date(1787791207871));
   });
 
+  it("captures the applicant signal from applicationInfo (isApplicationCompleted)", () => {
+    const applied = parseZillowLead(rawLead({ applicationInfo: { numCoApplicants: 2, isApplicationsAccepted: true, isApplicationSent: true, isApplicationCompleted: true } }));
+    expect(applied!.applicationCompleted).toBe(true);
+    expect(applied!.applicationSent).toBe(true);
+    expect(applied!.coApplicants).toBe(2);
+  });
+
+  it("isApplicationsAccepted (a LISTING setting) does NOT mark someone as an applicant", () => {
+    // The live sample had isApplicationsAccepted=true for ALL leads — must be ignored.
+    const notApplied = parseZillowLead(rawLead({ applicationInfo: { numCoApplicants: 0, isApplicationsAccepted: true, isApplicationSent: false, isApplicationCompleted: false } }));
+    expect(notApplied!.applicationCompleted).toBe(false);
+    expect(notApplied!.coApplicants).toBe(0);
+  });
+
+  it("missing applicationInfo → not an applicant (defaults, no crash)", () => {
+    const lead = parseZillowLead(rawLead());
+    expect(lead!.applicationCompleted).toBe(false);
+    expect(lead!.applicationSent).toBe(false);
+    expect(lead!.coApplicants).toBe(0);
+  });
+
   it("survives a lead with no leadId (45/200 real leads lack one)", () => {
     const lead = parseZillowLead(rawLead({ renterInfo: { renterName: "No Id", renterPhoneNumber: "312-555-0000", leadId: undefined } }));
     expect(lead!.name).toBe("No Id");

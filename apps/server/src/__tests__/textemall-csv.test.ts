@@ -112,6 +112,43 @@ describe("buildTextEmAllCsv", () => {
     expect(r.phones.filter((x) => x === "+17084158984")).toHaveLength(1);
   });
 
+  it("segment=leads EXCLUDES applicants (they only get the follow-up)", async () => {
+    testAlwaysInclude = "";
+    await lead(); // a plain new lead
+    await lead({ applicationCompleted: true }); // an applicant — must NOT appear in leads segment
+    const r = await buildTextEmAllCsv({ propertyId, write: false, segment: "leads" });
+    expect(r.leadCount).toBe(1);
+  });
+
+  it("segment=applicants selects ONLY applicationCompleted, not yet applicant-messaged", async () => {
+    testAlwaysInclude = "";
+    await lead(); // plain lead — excluded from applicants
+    const a = await lead({ applicationCompleted: true });
+    const r = await buildTextEmAllCsv({ propertyId, write: false, segment: "applicants" });
+    expect(r.leadCount).toBe(1);
+    expect(r.phones).toEqual([a.phone]);
+  });
+
+  it("segment=applicants dedups via applicantSentBatchId, NOT the shared sent-batch (lead send doesn't block the follow-up)", async () => {
+    testAlwaysInclude = "";
+    const a = await lead({ applicationCompleted: true });
+    // this applicant's phone was already pushed in a SENT (lead) batch
+    await prisma.textEmAllBatch.create({ data: { day: `${P}-s`, groupName: P, phones: [a.phone], count: 1, status: "sent" } as any });
+    const still = await buildTextEmAllCsv({ propertyId, write: false, segment: "applicants" });
+    expect(still.phones).toEqual([a.phone]); // still eligible for the follow-up
+    // once marked on the applicant segment, excluded
+    await prisma.zillowLead.update({ where: { id: a.id }, data: { applicantSentBatchId: "b1" } });
+    const after = await buildTextEmAllCsv({ propertyId, write: false, segment: "applicants" });
+    expect(after.leadCount).toBe(0);
+  });
+
+  it("owner-only applicants batch → leadCount 0 (send gate blocks it)", async () => {
+    testAlwaysInclude = "+17084158984";
+    const r = await buildTextEmAllCsv({ propertyId, write: false, segment: "applicants" });
+    expect(r.leadCount).toBe(0); // no genuine applicants; only the owner row
+    expect(r.count).toBe(1);
+  });
+
   it("dedupes a phone that appears twice in the lead set", async () => {
     const dup = phone();
     await lead({ phone: dup, nameKey: `${P}d1` });

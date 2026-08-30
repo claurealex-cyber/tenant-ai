@@ -676,6 +676,11 @@ model ZillowLead {
   zillowStatus   String?
   lastMessage    String?
   status         String    @default("new") // new | invited | applied | opted_out | no_phone
+  applicationCompleted Boolean @default(false) // renter submitted a Zillow application (applicationInfo.isApplicationCompleted)
+  applicationSent      Boolean @default(false) // landlord invited this renter to apply
+  coApplicants         Int     @default(0)
+  applicantSentBatchId String?  // TextEmAllBatch.id when messaged on the APPLICANT segment
+  applicantInvitedAt   DateTime? // when the applicant follow-up was sent
   sentVia        String?   // which channel sent the link: relay | textemall (null = legacy relay)
   sentBatchId    String?   // TextEmAllBatch.id when sentVia = textemall
   inviteId       String?
@@ -687,6 +692,7 @@ model ZillowLead {
 
   @@unique([phone, propertyId])
   @@index([status])
+  @@index([applicationCompleted])
   @@index([firstContactAt])
 }
 

@@ -327,7 +327,45 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
           }).catch((e) => console.error("textemall lead flip failed (broadcast already sent, safe):", e));
         }
         console.log(`[zillow-auto] textemall API broadcast ${bc.broadcastId} → ${bc.recipients} recipient(s); flipped ${flipIds.length} lead(s).`);
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: bc.recipients, sentDelta: flipIds.length });
+
+        // ── Applicant segment (toggleable, api-mode only): message people who
+        // ACTUALLY APPLIED with a distinct follow-up. Gated on applicant_relay_enabled
+        // and on there being GENUINE new applicants (never an owner-only send —
+        // realtime-plan lesson). Dedup via applicantSentBatchId, independent of the
+        // lead segment, so someone texted earlier as a lead still gets the follow-up.
+        let applicantsSent = 0;
+        if ((await resolveConfig("textemall", "applicant_relay_enabled")) === "true") {
+          const applCsv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, segment: "applicants" });
+          if (applCsv.leadCount > 0 && applCsv.csvPath) {
+            const applMsg = (await resolveConfig("textemall", "applicant_broadcast_message")) ??
+              "Hi! Thanks for submitting your application with Ghem Properties — we've received it and will follow up with next steps shortly. Reply here with any questions.";
+            const applBatch = await prisma.textEmAllBatch.upsert({
+              where: { slot: `${broadcastSlot}:appl` },
+              create: { slot: `${broadcastSlot}:appl`, day, groupName: "applicants", phones: applCsv.phones, count: applCsv.count, status: "built", csvPath: applCsv.csvPath },
+              update: { phones: applCsv.phones, count: applCsv.count, status: "built", csvPath: applCsv.csvPath, error: null },
+            });
+            const abc = await withGuiLock("textemall-api", () => sendBroadcastViaApi({ phones: applCsv.phones, message: applMsg }));
+            if (abc.status === "ok") {
+              await prisma.textEmAllBatch.update({ where: { id: applBatch.id }, data: { status: "sent", phones: abc.sentPhones } });
+              const aDigits = new Set(abc.sentPhones.map((x) => x.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")));
+              const applicants = await prisma.zillowLead.findMany({
+                where: { phone: { in: applCsv.phones }, applicationCompleted: true, applicantSentBatchId: null }, select: { id: true, phone: true },
+              });
+              const aIds = applicants.filter((l) => aDigits.has((l.phone ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""))).map((l) => l.id);
+              if (aIds.length) {
+                await prisma.zillowLead.updateMany({ where: { id: { in: aIds } }, data: { applicantSentBatchId: applBatch.id, applicantInvitedAt: now } })
+                  .catch((e) => console.error("applicant mark failed (broadcast already sent, safe):", e));
+              }
+              applicantsSent = aIds.length;
+              console.log(`[zillow-auto] applicant follow-up broadcast ${abc.broadcastId} → ${abc.recipients} recipient(s); marked ${applicantsSent} applicant(s).`);
+            } else {
+              await prisma.textEmAllBatch.update({ where: { id: applBatch.id }, data: { status: "failed", error: `applicant broadcast ${abc.status}`.slice(0, 500) } });
+              console.warn(`[zillow-auto] applicant broadcast failed: ${abc.status} — leads segment unaffected.`);
+            }
+          }
+        }
+
+        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: bc.recipients + applicantsSent, sentDelta: flipIds.length + applicantsSent });
         return { outcome: "ran", run: toRunSummary(row) };
       }
 

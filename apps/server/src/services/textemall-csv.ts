@@ -21,7 +21,8 @@ import { resolveConfig } from "@tenant-ai/shared";
  * GUI step) and does NOT broadcast (that is the form-trigger step).
  */
 export interface TextEmAllCsv {
-  count: number;
+  count: number;       // total rows incl. the owner-check row
+  leadCount: number;   // genuine recipients EXCLUDING the always-include owner (the send gate)
   phones: string[];
   csv: string;
   csvPath: string | null;
@@ -40,16 +41,34 @@ export async function buildTextEmAllCsv(opts: {
   propertyId?: string;
   write?: boolean;
   now?: Date;
+  segment?: "leads" | "applicants";
 }): Promise<TextEmAllCsv> {
   const now = opts.now ?? new Date();
+  const segment = opts.segment ?? "leads";
 
+  // Segment selection:
+  //  - "leads": new, not-yet-applied leads (applicants are EXCLUDED so they only
+  //    ever get the applicant follow-up, never the lead link).
+  //  - "applicants": people who submitted a Zillow application and have NOT yet
+  //    been messaged on the applicant segment (dedup via applicantSentBatchId — a
+  //    per-segment marker, so someone messaged earlier as a lead is still eligible
+  //    for the applicant follow-up).
   const leads = await prisma.zillowLead.findMany({
-    where: {
-      status: "new",
-      phone: { not: null },
-      propertyId: opts.propertyId ? opts.propertyId : { not: null },
-      ...(opts.baseline ? { createdAt: { gte: opts.baseline } } : {}),
-    },
+    where: segment === "applicants"
+      ? {
+          applicationCompleted: true,
+          applicantSentBatchId: null,
+          phone: { not: null },
+          propertyId: opts.propertyId ? opts.propertyId : { not: null },
+          ...(opts.baseline ? { createdAt: { gte: opts.baseline } } : {}),
+        }
+      : {
+          status: "new",
+          applicationCompleted: false,
+          phone: { not: null },
+          propertyId: opts.propertyId ? opts.propertyId : { not: null },
+          ...(opts.baseline ? { createdAt: { gte: opts.baseline } } : {}),
+        },
     select: { id: true, name: true, phone: true },
     orderBy: { createdAt: "desc" },
   });
@@ -59,16 +78,15 @@ export async function buildTextEmAllCsv(opts: {
     (await prisma.smsOptOut.findMany({ select: { phone: true } })).map((o) => o.phone),
   );
 
-  // Dedupe vs any phone already pushed in a SENT Text-Em-All batch (rev.3 C:
-  // "sent" batch, not just invited leads — a post-broadcast flip failure must
-  // never cause a re-broadcast).
-  const sentBatches = await prisma.textEmAllBatch.findMany({
-    where: { status: "sent" },
-    select: { phones: true },
-  });
+  // Dedupe vs any phone already pushed in a SENT Text-Em-All batch (rev.3 C).
+  // LEADS segment only — the applicants segment dedups via applicantSentBatchId, so
+  // an applicant already texted as a lead is still eligible for the follow-up.
   const alreadySent = new Set<string>();
-  for (const b of sentBatches) {
-    for (const p of (b.phones as string[] | null) ?? []) alreadySent.add(p);
+  if (segment === "leads") {
+    const sentBatches = await prisma.textEmAllBatch.findMany({ where: { status: "sent" }, select: { phones: true } });
+    for (const b of sentBatches) {
+      for (const p of (b.phones as string[] | null) ?? []) alreadySent.add(p);
+    }
   }
 
   const seen = new Set<string>();
@@ -79,6 +97,8 @@ export async function buildTextEmAllCsv(opts: {
     seen.add(phone);
     rows.push({ name: l.name ?? "", phone });
   }
+
+  const leadCount = rows.length; // genuine recipients EXCLUDING the owner-check row (the send gate)
 
   // ALWAYS append the owner's verification number (owner: "make it a habit") so
   // every broadcast is also delivered to the owner as a live "it sent" check —
@@ -92,7 +112,7 @@ export async function buildTextEmAllCsv(opts: {
   }
 
   if (rows.length === 0) {
-    return { count: 0, phones: [], csv: "", csvPath: null }; // (only if no owner number configured)
+    return { count: 0, leadCount: 0, phones: [], csv: "", csvPath: null }; // (only if no owner number configured)
   }
 
   const header = "Name,Phone";
@@ -108,5 +128,5 @@ export async function buildTextEmAllCsv(opts: {
     await writeFile(csvPath, csv, "utf8");
   }
 
-  return { count: rows.length, phones: rows.map((r) => r.phone), csv, csvPath };
+  return { count: rows.length, leadCount, phones: rows.map((r) => r.phone), csv, csvPath };
 }

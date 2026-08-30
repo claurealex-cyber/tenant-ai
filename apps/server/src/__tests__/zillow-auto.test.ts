@@ -19,6 +19,8 @@ const cfg = {
   broadcastMethod: null as string | null, // zillow.broadcast_method (lane): null/form | api
   legacyBroadcastMethod: null as string | null, // textemall.broadcast_method (legacy global fallback)
   broadcastMessage: "APPLY: https://x" as string | null, // textemall.broadcast_message
+  applicantRelayEnabled: null as string | null, // textemall.applicant_relay_enabled
+  applicantMessage: "THANKS FOR APPLYING" as string | null, // textemall.applicant_broadcast_message
 };
 vi.mock("@tenant-ai/shared", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tenant-ai/shared")>();
@@ -39,6 +41,8 @@ vi.mock("@tenant-ai/shared", async (importOriginal) => {
       if (ns === "zillow" && key === "broadcast_method") return cfg.broadcastMethod;
       if (ns === "textemall" && key === "broadcast_method") return cfg.legacyBroadcastMethod;
       if (ns === "textemall" && key === "broadcast_message") return cfg.broadcastMessage;
+      if (ns === "textemall" && key === "applicant_relay_enabled") return cfg.applicantRelayEnabled;
+      if (ns === "textemall" && key === "applicant_broadcast_message") return cfg.applicantMessage;
       return original.resolveConfig(ns, key);
     },
   };
@@ -110,9 +114,11 @@ beforeEach(() => {
   cfg.broadcastMethod = null;
   cfg.legacyBroadcastMethod = null;
   cfg.broadcastMessage = "APPLY: https://x";
+  cfg.applicantRelayEnabled = null;
+  cfg.applicantMessage = "THANKS FOR APPLYING";
   mockImport.mockReset().mockResolvedValue(IMPORT_OK);
   mockBatch.mockReset().mockResolvedValue(BATCH_OK);
-  mockCsv.mockReset().mockResolvedValue({ count: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: "/tmp/x.csv" });
+  mockCsv.mockReset().mockResolvedValue({ count: 2, leadCount: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: "/tmp/x.csv" });
   mockIris.mockReset().mockResolvedValue({ status: "ok", count: 2, phones: ["+12245550001","+12245550002"] });
   mockTrigger.mockReset().mockResolvedValue({ fired: false, reason: "not_armed", body: "x" });
   mockBroadcastApi.mockReset().mockResolvedValue({ status: "ok", broadcastId: 1, recipients: 2, sentPhones: [] });
@@ -426,6 +432,50 @@ describe("send_channel branch (Text-Em-All foundation)", () => {
     expect(res.outcome).toBe("ran");
     expect(mockBroadcastApi).not.toHaveBeenCalled(); // lane=form → NOT the API path
     expect(mockIris).toHaveBeenCalled();             // group-edit form path instead
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("applicant segment OFF by default → only the leads broadcast fires", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api";
+    const now = nextDay(10);
+    await runDailyAutomation({ now });
+    expect(mockBroadcastApi).toHaveBeenCalledTimes(1); // leads only
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("applicant segment ON + new applicants → SECOND broadcast with the applicant message; marks applicantSentBatchId", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api";
+    cfg.applicantRelayEnabled = "true"; cfg.applicantMessage = "THANKS FOR APPLYING";
+    const ap = `+1224968${String(Date.now()).slice(-4)}`;
+    // leads segment empty; applicants segment returns our applicant
+    mockCsv.mockImplementation(async (o: any) => o?.segment === "applicants"
+      ? { count: 2, leadCount: 1, phones: [ap, "+17084158984"], csv: "x", csvPath: "/tmp/a.csv" }
+      : { count: 1, leadCount: 0, phones: ["+17084158984"], csv: "x", csvPath: "/tmp/l.csv" });
+    mockBroadcastApi.mockImplementation(async (o: any) => ({ status: "ok", broadcastId: 7, recipients: o.phones.length, sentPhones: o.phones }));
+    const imp = await prisma.zillowImportRun.create({ data: { status: "done" } });
+    const a = await prisma.zillowLead.create({ data: { name: "APP", nameKey: `app${Date.now()}`, phone: ap, propertyText: "x", status: "invited", applicationCompleted: true, firstContactAt: new Date(), importRunId: imp.id } });
+    const now = nextDay(10);
+    const res = await runDailyAutomation({ now });
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).toHaveBeenCalledTimes(2); // leads + applicants
+    const applCall = mockBroadcastApi.mock.calls.find((c: any[]) => c[0].message === "THANKS FOR APPLYING");
+    expect(applCall).toBeTruthy();
+    const marked = await prisma.zillowLead.findUnique({ where: { id: a.id } });
+    expect(marked!.applicantSentBatchId).toBeTruthy();
+    expect(marked!.applicantInvitedAt).toBeTruthy();
+    await prisma.zillowLead.deleteMany({ where: { id: a.id } });
+    await prisma.zillowImportRun.deleteMany({ where: { id: imp.id } });
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("applicant segment ON but only owner (leadCount 0) → NO applicant broadcast (no owner spam)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = "true";
+    mockCsv.mockImplementation(async (o: any) => o?.segment === "applicants"
+      ? { count: 1, leadCount: 0, phones: ["+17084158984"], csv: "x", csvPath: "/tmp/a.csv" } // owner only
+      : { count: 2, leadCount: 2, phones: ["+12245550001","+12245550002"], csv: "x", csvPath: "/tmp/l.csv" });
+    const now = nextDay(10);
+    await runDailyAutomation({ now });
+    expect(mockBroadcastApi).toHaveBeenCalledTimes(1); // leads only; applicant owner-only skipped
     await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
   });
 

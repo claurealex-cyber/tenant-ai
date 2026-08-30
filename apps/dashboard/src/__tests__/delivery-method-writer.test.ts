@@ -12,7 +12,7 @@ vi.mock("@tenant-ai/shared", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tenant-ai/shared")>();
   return { ...actual, encrypt: (v: string) => v, clearConfigCache: () => {} };
 });
-const mockProxy = vi.fn(async () => ({ ok: true }));
+const mockProxy = vi.fn(async (..._a: any[]) => ({ ok: true }));
 vi.mock("@/lib/zillow-admin", () => ({ proxyToServer: (...a: unknown[]) => mockProxy(...a) }));
 
 import { setLaneDeliveryMethod } from "../lib/delivery-method";

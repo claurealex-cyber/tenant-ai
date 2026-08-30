@@ -22,6 +22,9 @@ export interface ParsedLead {
   firstContactAt: Date | null;
   zillowStatus: string | null;
   lastMessage: string | null;
+  applicationCompleted: boolean; // renter actually submitted a Zillow application
+  applicationSent: boolean;      // landlord invited this renter to apply
+  coApplicants: number;
 }
 
 /** "(630) 461-1750", "630-461-1750", "+16304611750" → "+16304611750". */
@@ -61,6 +64,12 @@ export function parseZillowLead(item: unknown): ParsedLead | null {
     firstContactAt: tsMs > 0 ? new Date(tsMs) : null,
     zillowStatus: String(o.statusLabel?.text ?? "").trim() || null,
     lastMessage: String(o.latestContact?.messageText ?? "").trim().slice(0, 500) || null,
+    // applicationInfo (discovered 2026-08-29): isApplicationCompleted === true means
+    // the renter actually APPLIED. isApplicationsAccepted is a LISTING setting, not
+    // an applicant signal, so it is deliberately ignored here.
+    applicationCompleted: o.applicationInfo?.isApplicationCompleted === true,
+    applicationSent: o.applicationInfo?.isApplicationSent === true,
+    coApplicants: Number(o.applicationInfo?.numCoApplicants ?? 0) || 0,
   };
 }
 
@@ -231,6 +240,9 @@ export async function ingestLeads(
           firstContactAt: lead.firstContactAt,
           zillowStatus: lead.zillowStatus,
           lastMessage: lead.lastMessage,
+          applicationCompleted: lead.applicationCompleted,
+          applicationSent: lead.applicationSent,
+          coApplicants: lead.coApplicants,
           importRunId: runId,
           // Heal an orphaned row (null property from a past census flap) once
           // matching resolves a real property again.
@@ -254,6 +266,9 @@ export async function ingestLeads(
           firstContactAt: lead.firstContactAt,
           zillowStatus: lead.zillowStatus,
           lastMessage: lead.lastMessage,
+          applicationCompleted: lead.applicationCompleted,
+          applicationSent: lead.applicationSent,
+          coApplicants: lead.coApplicants,
           status: lead.phone ? "new" : "no_phone",
           importRunId: runId,
         },
