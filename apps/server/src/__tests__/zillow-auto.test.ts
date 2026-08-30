@@ -443,6 +443,27 @@ describe("send_channel branch (Text-Em-All foundation)", () => {
     await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
   });
 
+  it("relay OFF → leads CSV built WITHOUT excludeApplicants (applicants still get the lead msg)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = null;
+    const now = nextDay(10);
+    await runDailyAutomation({ now });
+    const leadCall = mockCsv.mock.calls.find((c: any[]) => (c[0]?.segment ?? "leads") === "leads");
+    expect(leadCall![0].excludeApplicants).toBeFalsy();
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
+  it("relay ON → leads CSV built WITH excludeApplicants (applicants routed to the follow-up)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = "true";
+    mockCsv.mockImplementation(async (o: any) => o?.segment === "applicants"
+      ? { count: 1, leadCount: 0, phones: ["+17084158984"], csv: "x", csvPath: null }
+      : { count: 2, leadCount: 2, phones: ["+12245550001","+12245550002"], csv: "x", csvPath: "/tmp/l.csv" });
+    const now = nextDay(10);
+    await runDailyAutomation({ now });
+    const leadCall = mockCsv.mock.calls.find((c: any[]) => (c[0]?.segment ?? "leads") === "leads");
+    expect(leadCall![0].excludeApplicants).toBe(true);
+    await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(now) } });
+  });
+
   it("applicant segment ON + new applicants → SECOND broadcast with the applicant message; marks applicantSentBatchId", async () => {
     cfg.channel = "textemall"; cfg.broadcastHour = "10"; cfg.broadcastMethod = "api";
     cfg.applicantRelayEnabled = "true"; cfg.applicantMessage = "THANKS FOR APPLYING";

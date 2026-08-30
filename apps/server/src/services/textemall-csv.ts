@@ -42,6 +42,10 @@ export async function buildTextEmAllCsv(opts: {
   write?: boolean;
   now?: Date;
   segment?: "leads" | "applicants";
+  /** Leads segment: exclude applicants (route them to the applicant follow-up).
+   *  Only set when the applicant relay is ON — otherwise applicants must still
+   *  receive the lead broadcast, or they fall through the cracks. */
+  excludeApplicants?: boolean;
 }): Promise<TextEmAllCsv> {
   const now = opts.now ?? new Date();
   const segment = opts.segment ?? "leads";
@@ -64,7 +68,7 @@ export async function buildTextEmAllCsv(opts: {
         }
       : {
           status: "new",
-          applicationCompleted: false,
+          ...(opts.excludeApplicants ? { applicationCompleted: false } : {}),
           phone: { not: null },
           propertyId: opts.propertyId ? opts.propertyId : { not: null },
           ...(opts.baseline ? { createdAt: { gte: opts.baseline } } : {}),

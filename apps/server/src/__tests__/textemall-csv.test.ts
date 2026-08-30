@@ -112,12 +112,20 @@ describe("buildTextEmAllCsv", () => {
     expect(r.phones.filter((x) => x === "+17084158984")).toHaveLength(1);
   });
 
-  it("segment=leads EXCLUDES applicants (they only get the follow-up)", async () => {
+  it("leads segment EXCLUDES applicants ONLY when excludeApplicants (relay on)", async () => {
     testAlwaysInclude = "";
     await lead(); // a plain new lead
-    await lead({ applicationCompleted: true }); // an applicant — must NOT appear in leads segment
+    await lead({ applicationCompleted: true }); // an applicant
+    const excluded = await buildTextEmAllCsv({ propertyId, write: false, segment: "leads", excludeApplicants: true });
+    expect(excluded.leadCount).toBe(1); // applicant routed away to the follow-up
+  });
+
+  it("REGRESSION: relay off (excludeApplicants unset) → applicants STILL get the lead broadcast", async () => {
+    testAlwaysInclude = "";
+    await lead(); // plain new lead
+    await lead({ applicationCompleted: true }); // applicant who is a new lead
     const r = await buildTextEmAllCsv({ propertyId, write: false, segment: "leads" });
-    expect(r.leadCount).toBe(1);
+    expect(r.leadCount).toBe(2); // BOTH included — no one falls through the cracks
   });
 
   it("segment=applicants selects ONLY applicationCompleted, not yet applicant-messaged", async () => {

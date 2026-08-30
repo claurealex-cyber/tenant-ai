@@ -278,7 +278,10 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
           return { outcome: "ran", run: toRunSummary(row) };
         }
       }
-      const csv = await buildTextEmAllCsv({ baseline: baseline ?? undefined });
+      const applicantRelayEnabled = (await resolveConfig("textemall", "applicant_relay_enabled")) === "true";
+      // Exclude applicants from the LEAD broadcast ONLY when the applicant relay is
+      // on (else an applicant who is a new lead would get neither message).
+      const csv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, excludeApplicants: applicantRelayEnabled });
       if (csv.count === 0 || !csv.csvPath) {
         // Empty-batch skip (§2d #11): no delete, no upload, no broadcast.
         const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
@@ -334,9 +337,9 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
         // realtime-plan lesson). Dedup via applicantSentBatchId, independent of the
         // lead segment, so someone texted earlier as a lead still gets the follow-up.
         let applicantsSent = 0;
-        if ((await resolveConfig("textemall", "applicant_relay_enabled")) === "true") {
-          const applCsv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, segment: "applicants" });
-          if (applCsv.leadCount > 0 && applCsv.csvPath) {
+        if (applicantRelayEnabled) {
+          const applCsv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, segment: "applicants", write: false });
+          if (applCsv.leadCount > 0) { // API path sends by phone; no CSV file needed
             const applMsg = (await resolveConfig("textemall", "applicant_broadcast_message")) ??
               "Hi! Thanks for submitting your application with Ghem Properties — we've received it and will follow up with next steps shortly. Reply here with any questions.";
             const applBatch = await prisma.textEmAllBatch.upsert({
