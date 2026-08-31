@@ -125,6 +125,22 @@ tell application "Safari"
   end if
 end tell`;
 
+/** Force the matched rental-manager tab to actually NAVIGATE (zombie-tab heal):
+ *  re-setting the URL property triggers a real load on a session-restored tab
+ *  that was never materialized (URL property set, page still about:blank). */
+const NUDGE_TAB = `
+tell application "Safari"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if URL of t contains "${TAB_MATCH}" then
+        set URL of t to "${LEADS_URL}"
+        return "nudged"
+      end if
+    end repeat
+  end repeat
+end tell
+return "no-tab"`;
+
 function osascript(args: string[], timeoutMs = 20_000): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("/usr/bin/osascript", args, { timeout: timeoutMs, maxBuffer: 1_000_000 }, (err, stdout, stderr) => {
@@ -188,6 +204,8 @@ async function extract(opts: ExtractOptions): Promise<ExtractResult> {
   // 2. Wait for the page, then classify where we actually are. A signed-out
   //    session redirects away from rental-manager → needs-login, full stop.
   const loadDeadline = Date.now() + loadTimeout;
+  const nudgeAt = Date.now() + 5_000;
+  let nudged = false;
   let href = "";
   for (;;) {
     if (Date.now() > loadDeadline) throw new ZillowExtractError("load-timeout", `page never loaded (${href || "no page state"})`);
@@ -198,6 +216,16 @@ async function extract(opts: ExtractOptions): Promise<ExtractResult> {
       // about:blank reports readyState "complete" before navigation starts —
       // only accept "complete" once we're on a real page.
       if (state === "complete" && classifyPageState(href) !== "loading") break;
+      // ZOMBIE-TAB SELF-HEAL (live-observed 2026-08-31): after a Safari
+      // relaunch, a session-restored tab can carry the rental-manager URL
+      // *property* (and cached title) while its actual page is about:blank —
+      // it never navigates on its own, so every scrape load-times-out until a
+      // human pokes the tab. If the matched tab still shows no real page after
+      // 5 s, force ONE navigation by re-setting its URL, then keep waiting.
+      if (!nudged && Date.now() > nudgeAt && classifyPageState(href) === "loading") {
+        nudged = true;
+        await osascript(["-e", NUDGE_TAB]).catch(() => undefined); // best-effort; the deadline still governs
+      }
     } catch (err) {
       // Tab may briefly not match while Safari is mid-navigation to login.
       if (!(err instanceof ZillowExtractError && err.kind === "no-tab" && opened)) throw err;

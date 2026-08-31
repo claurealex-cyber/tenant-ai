@@ -255,12 +255,27 @@ The applicant toggle is `textemall.applicant_relay_enabled`; new keys are
   prune runs from the watchdog's timer callback, not `watchdogTick` (tests
   invoke the tick against shared-DB fixtures).
 
-### M7 — LIVE GATE: PENDING (needs the owner + a server restart)
-Deploy via the launchd sequence (kill launcher pid → wait for :3000/:3002/:3005
-→ `launchctl kickstart gui/$(id -u)/com.tenantai.launcher`; avoid 09:30–09:40
-and the first 5 min of 10/16/22), then the drills in M7 above. Polling stays
-INERT until `zillow.fast_poll_sec` is set (>0) — deploying changes nothing by
-itself; the lane must also be textemall + api.
+### M7 — LIVE GATE: DEPLOYED + ARMED 2026-08-31 ~14:21 CDT; core drills observed on real traffic
+- Deployed via the launchd sequence (ports freed in 2 s, cached rebuild, healthy
+  in seconds, pid 17640); `zillow.fast_poll_sec=180` set + config refresh —
+  status flipped `poll_off → warming_up` live (no restart).
+- **Observed live:** 120 s boot guard held; `gui_busy` politeness skip; failed
+  cycles paced at full gap (no hammering); lazy minute-slot rows written only on
+  action; **cycle 3 `ran` → TEA broadcast 35981185, 7 recipients (6 new leads +
+  owner check), 6 leads flipped, 90 min before the 16:00 slot** — the poll
+  drained the backlog stranded by the morning's failure.
+- **Root-caused a pre-existing env failure the poll surfaced:** today's 10:00
+  scheduled slot had already failed `load-timeout (about:blank)` — a Safari
+  session-restore ZOMBIE TAB (URL property + cached title present, page never
+  materialized; `do JavaScript` sees about:blank). Healed live by re-setting the
+  tab URL; **root-fixed in `zillow-extract.ts`** (one-shot NUDGE_TAB after 5 s of
+  about:blank in the load wait). The fix rides the next restart (start.sh
+  rebuilds on every launch — exactly when zombie tabs are born).
+- **Remaining drills for the owner:** applicant follow-up with no new leads
+  (needs `textemall.applicant_relay_enabled=true` — decision 3 below); confirm
+  zero cycles after 22:00 tonight (clock-stubbed in tests; log check:
+  `grep zillow-poll ~/Library/Logs/tenant-ai.log`); kill-mid-send quarantine
+  drill (covered by fixtures; live occurrence will self-resolve).
 
 ## Open decisions (owner)
 1. `fast_poll_sec` default 180 ok? (floor 120 = anti-bot caution)
