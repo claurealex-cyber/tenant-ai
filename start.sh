@@ -149,6 +149,15 @@ for i in {1..30}; do
   sleep 1
 done
 
+# 5b. Install dependencies + regenerate the Prisma client. `npm install` is a
+#     no-op in seconds when the lockfile is unchanged, but after a git pull that
+#     adds packages or touches the schema, the Dock relaunch must never die at
+#     the migrate/build steps for want of node_modules or a stale client.
+echo "▶ Installing dependencies (instant when unchanged)…"
+npm install --no-audit --no-fund
+echo "▶ Generating Prisma client…"
+npm run db:generate >/dev/null
+
 # 6. Apply any pending database migrations (no-op when already up to date).
 echo "▶ Applying database migrations…"
 ( cd apps/server && npx prisma migrate deploy )
