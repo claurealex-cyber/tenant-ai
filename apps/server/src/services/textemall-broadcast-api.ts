@@ -76,12 +76,14 @@ async function runInTeaTab(js: string, timeoutMs: number): Promise<string> {
  * the API. Never throws — returns a status. `deps.run` injectable for tests.
  */
 export async function sendBroadcastViaApi(
-  opts: { phones: string[]; message: string; timeoutMs?: number },
+  opts: { phones: string[]; message: string; timeoutMs?: number; name?: string },
   deps: { run?: (js: string) => Promise<string> } = {},
 ): Promise<BroadcastResult> {
   const textNumberId = parseInt((await resolveConfig("textemall", "broadcast_text_number_id")) || "84582", 10);
   const callerId = (await resolveConfig("textemall", "broadcast_caller_id")) || "(773) 376-0486";
-  const name = (await resolveConfig("textemall", "broadcast_name")) || "Ghem Leads";
+  // Per-lane broadcast name (rev.5 U5): the individual lane passes its own name
+  // so ambiguity resolution can never cross-match broadcasts between lanes.
+  const name = opts.name ?? ((await resolveConfig("textemall", "broadcast_name")) || "Ghem Leads");
   const run = deps.run ?? ((js: string) => runInTeaTab(js, opts.timeoutMs ?? 180_000));
   try {
     const out = await run(buildBroadcastJs(opts.phones, opts.message, textNumberId, callerId, name));
@@ -91,6 +93,94 @@ export async function sendBroadcastViaApi(
       // Map back to E.164 so callers flip/verify only who was really sent to.
       const sentPhones = (p.added ?? []).map((d) => (d.length === 10 ? `+1${d}` : d));
       return { status: "ok", broadcastId: p.broadcastId ?? 0, recipients: sentPhones.length, sentPhones };
+    }
+    if (p.r === "needs_login") return { status: "needs_login" };
+    return { status: "failed", detail: p.d ?? "unknown" };
+  } catch (err) {
+    return { status: "failed", detail: (err instanceof Error ? err.message : String(err)).slice(0, 200) };
+  }
+}
+
+/**
+ * Classify a FAILED send (rev.5 S4/M3b). Stage markers emitted by buildBroadcastJs
+ * BEFORE the final send POST are definitely-unsent → safe to retry. Everything
+ * else — the `send N` stage, an osascript timeout, a killed process — is
+ * AMBIGUOUS: the final POST may have landed, so the batch must quarantine until
+ * resolution proves whether a broadcast exists (never blind-retry → double-text).
+ */
+export function classifyBroadcastFailure(detail: string): "unsent" | "ambiguous" {
+  const d = (detail || "").trim();
+  if (
+    d.startsWith("draft ") ||
+    d.startsWith("type ") ||
+    d === "no valid phones" ||
+    d === "no recipients added" ||
+    d === "no text-em-all tab open"
+  ) {
+    return "unsent";
+  }
+  return "ambiguous";
+}
+
+export interface BroadcastProbe {
+  id: number;
+  /** ms epoch of CreatedDate, or null when unparseable (treated as a candidate). */
+  createdAtMs: number | null;
+  /** Recipient phones, 10-digit. */
+  phones: string[];
+}
+
+/** One JS run: list recent broadcasts with this exact name + their recipients. */
+export function buildProbeJs(name: string, max = 10): string {
+  return `(function(){
+    function J(u){var x=new XMLHttpRequest();x.open('GET',u,false);x.withCredentials=true;x.setRequestHeader('Accept','application/json');x.send(null);return x;}
+    try{
+      var lr=J('/proxy/broadcasts?page=1&pageSize=30');
+      if(lr.status===401||lr.status===403) return JSON.stringify({r:'needs_login'});
+      if(lr.status!==200) return JSON.stringify({r:'failed',d:'list '+lr.status});
+      var items=(JSON.parse(lr.responseText).Items||[]).filter(function(b){return b.BroadcastName===${JSON.stringify(name)};}).slice(0,${max});
+      var out=[];
+      items.forEach(function(b){
+        var dr=J('/proxy/broadcasts/'+b.BroadcastID+'/details');
+        var phones=[];
+        if(dr.status===200){ try{ phones=(JSON.parse(dr.responseText).Items||[]).map(function(i){return String(i.PhoneNumber||'');}); }catch(e){} }
+        out.push({id:b.BroadcastID,created:b.CreatedDate||null,phones:phones});
+      });
+      return JSON.stringify({r:'ok',broadcasts:out});
+    }catch(e){ return JSON.stringify({r:'failed',d:String(e).slice(0,160)}); }
+  })();`;
+}
+
+/** "2026-08-28 17:12:12-0500" → ms epoch, or null. */
+export function parseTeaDate(raw: string | null): number | null {
+  if (!raw) return null;
+  const t = Date.parse(raw.replace(" ", "T"));
+  return Number.isFinite(t) ? t : null;
+}
+
+export type ProbeResult =
+  | { status: "ok"; broadcasts: BroadcastProbe[] }
+  | { status: "needs_login" }
+  | { status: "failed"; detail: string };
+
+/** Read-only: recent broadcasts named `name` + their recipient phone sets. */
+export async function probeRecentBroadcasts(
+  opts: { name: string; timeoutMs?: number },
+  deps: { run?: (js: string) => Promise<string> } = {},
+): Promise<ProbeResult> {
+  const run = deps.run ?? ((js: string) => runInTeaTab(js, opts.timeoutMs ?? 60_000));
+  try {
+    const out = await run(buildProbeJs(opts.name));
+    const p = JSON.parse(out) as { r: string; broadcasts?: Array<{ id: number; created: string | null; phones: string[] }>; d?: string };
+    if (p.r === "ok") {
+      return {
+        status: "ok",
+        broadcasts: (p.broadcasts ?? []).map((b) => ({
+          id: b.id,
+          createdAtMs: parseTeaDate(b.created),
+          phones: (b.phones ?? []).map(tenDigit).filter((x) => x.length === 10),
+        })),
+      };
     }
     if (p.r === "needs_login") return { status: "needs_login" };
     return { status: "failed", detail: p.d ?? "unknown" };

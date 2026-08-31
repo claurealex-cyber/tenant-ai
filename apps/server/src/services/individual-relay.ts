@@ -118,7 +118,10 @@ export async function runIndividualRelay(
   if ((await resolveBroadcastMethod("individual")) === "api") {
     const message = (await resolveConfig("textemall", "broadcast_message")) ??
       "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
-    const bc = await withGuiLock("individual-relay", () => sendBroadcastViaApi({ phones, message }));
+    // Per-lane broadcast name (rev.5 U5): keeps individual broadcasts
+    // distinguishable from zillow-lane ones in TEA and in ambiguity resolution.
+    const indName = (await resolveConfig("textemall", "individual_broadcast_name")) || "Individual Messaged";
+    const bc = await withGuiLock("individual-relay", () => sendBroadcastViaApi({ phones, message, name: indName }));
     if (bc.status !== "ok") return doRelay(`broadcast ${bc.status}`);
     // Verify the CALLER's number actually made it into the broadcast — if only the
     // owner-check got added, the caller didn't get the link, so relay-fallback.

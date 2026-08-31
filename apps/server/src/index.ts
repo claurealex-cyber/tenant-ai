@@ -15,6 +15,7 @@ import { ownerRoutes } from "./routes/owner.js";
 import { internalRoutes } from "./routes/internal.js";
 import { startRelaySweep } from "./services/relay-guards.js";
 import { startZillowWatchdog } from "./services/zillow-watchdog.js";
+import { startZillowFastPoll } from "./services/zillow-poll.js";
 import { registerJob } from "./jobs/scheduler.js";
 import { billingCycleJob } from "./jobs/billing-cycle.js";
 import { rentPostingJob } from "./jobs/rent-posting.js";
@@ -86,6 +87,9 @@ startRelaySweep((msg) => server.log.info(msg));
 // Zillow watchdog — also a plain setInterval (deliberately NOT BullMQ: it must
 // keep reporting when Redis is down, which is exactly when the tick is dead).
 startZillowWatchdog((msg) => server.log.warn(msg));
+// Zillow fast poll (real-time API mode) — plain setInterval for the same
+// reason. Inert unless the lane is textemall+api AND zillow.fast_poll_sec > 0.
+startZillowFastPoll((msg) => server.log.info(msg));
 
 // Background jobs — registered AFTER listen so a hung Redis connection can
 // never block the webhook endpoint from coming up. Each registration races a

@@ -87,7 +87,17 @@ export async function buildTextEmAllCsv(opts: {
   // an applicant already texted as a lead is still eligible for the follow-up.
   const alreadySent = new Set<string>();
   if (segment === "leads") {
-    const sentBatches = await prisma.textEmAllBatch.findMany({ where: { status: "sent" }, select: { phones: true } });
+    // Bounded scan (rev.5 U4): at poll cadence this query runs hundreds of
+    // times a day, so it must not walk every batch ever. 90 days is safe — the
+    // set only protects flip-failures, and leads from older batches were
+    // flipped (or ambiguity-resolved) long ago.
+    const dedupeSince = new Date(now.getTime() - 90 * 86_400_000);
+    // `ambiguous` batches count too (rev.5 M3b): their sends MAY have landed,
+    // so those phones stay quarantined until resolution promotes or demotes.
+    const sentBatches = await prisma.textEmAllBatch.findMany({
+      where: { status: { in: ["sent", "ambiguous"] }, createdAt: { gte: dedupeSince } },
+      select: { phones: true },
+    });
     for (const b of sentBatches) {
       for (const p of (b.phones as string[] | null) ?? []) alreadySent.add(p);
     }

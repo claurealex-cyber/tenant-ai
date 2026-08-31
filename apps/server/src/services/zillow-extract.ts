@@ -151,6 +151,8 @@ let running = false;
 export interface ExtractOptions {
   /** Directory the raw JSON audit copy is written into. */
   outDir: string;
+  /** false → skip writing the raw JSON snapshot (poll cycles, rev.5 M6). */
+  persistRaw?: boolean;
   loadTimeoutMs?: number;
   fetchTimeoutMs?: number;
 }
@@ -241,9 +243,12 @@ async function extract(opts: ExtractOptions): Promise<ExtractResult> {
   const total = parseInt(await runJs("String(window.__zx.total ?? '')"), 10);
 
   // 5. Audit copy on disk, then release page memory.
-  await mkdir(opts.outDir, { recursive: true });
-  const rawJsonPath = path.join(opts.outDir, `leads-raw-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
-  await writeFile(rawJsonPath, json, "utf8");
+  let rawJsonPath = "";
+  if (opts.persistRaw !== false) {
+    await mkdir(opts.outDir, { recursive: true });
+    rawJsonPath = path.join(opts.outDir, `leads-raw-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+    await writeFile(rawJsonPath, json, "utf8");
+  }
   await runJs("delete window.__zx; 'cleaned'").catch(() => undefined);
 
   return { leads, totalLeadCount: Number.isFinite(total) ? total : null, rawJsonPath };

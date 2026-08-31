@@ -69,9 +69,16 @@ vi.mock("../services/textemall-api.js", () => ({ setGroupViaApi: (...a: unknown[
 const mockTrigger = vi.fn();
 vi.mock("../services/textemall-trigger.js", () => ({ fireTextEmAllTrigger: (...a: unknown[]) => mockTrigger(...a) }));
 const mockBroadcastApi = vi.fn();
-vi.mock("../services/textemall-broadcast-api.js", () => ({ sendBroadcastViaApi: (...a: unknown[]) => mockBroadcastApi(...a) }));
+vi.mock("../services/textemall-broadcast-api.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../services/textemall-broadcast-api.js")>();
+  return { ...original, sendBroadcastViaApi: (...a: unknown[]) => mockBroadcastApi(...a) };
+});
+const mockResolveAmbiguity = vi.fn();
+vi.mock("../services/textemall-ambiguity.js", () => ({
+  resolveAmbiguousBatches: (...a: unknown[]) => mockResolveAmbiguity(...a),
+}));
 
-import { runDailyAutomation, getAutoStatus, localDay, localSlot, parseRunHours, STALE_RUNNING_MS } from "../services/zillow-auto.js";
+import { runDailyAutomation, runZillowCycle, getAutoStatus, localDay, localSlot, parseRunHours, STALE_RUNNING_MS, type RunRecorder } from "../services/zillow-auto.js";
 
 const prisma = new PrismaClient();
 
@@ -122,6 +129,7 @@ beforeEach(() => {
   mockIris.mockReset().mockResolvedValue({ status: "ok", count: 2, phones: ["+12245550001","+12245550002"] });
   mockTrigger.mockReset().mockResolvedValue({ fired: false, reason: "not_armed", body: "x" });
   mockBroadcastApi.mockReset().mockResolvedValue({ status: "ok", broadcastId: 1, recipients: 2, sentPhones: [] });
+  mockResolveAmbiguity.mockReset().mockResolvedValue({ checked: 0, promoted: 0, demoted: 0, unresolved: 0 });
 });
 
 describe("runDailyAutomation gates", () => {
@@ -671,5 +679,216 @@ describe("auto_run_hours (free-tier 3×/day cadence)", () => {
     expect(mockBroadcastApi).toHaveBeenCalled(); // API broadcast still fired despite being over cap
     expect(mockIris).not.toHaveBeenCalled();
     await prisma.textEmAllBatch.deleteMany({ where: { day: localDay(base) } });
+  });
+});
+
+/** Lazy-style fake recorder: collects finishes, returns the row-shaped summary. */
+function fakeRec(day: string, slot: string) {
+  const finishes: Array<{ status: string; patch: Record<string, unknown> }> = [];
+  const rec: RunRecorder = {
+    finish: async (status, patch) => {
+      finishes.push({ status, patch });
+      return {
+        day, slot, status, attempts: 1,
+        leadsFound: (patch.leadsFound as number) ?? 0,
+        leadsNew: (patch.leadsNewDelta as number) ?? 0,
+        queuedSends: (patch.queuedDelta as number) ?? 0,
+        sentImmediate: (patch.sentDelta as number) ?? 0,
+        error: (patch.error as string) ?? null,
+      };
+    },
+  };
+  return { rec, finishes };
+}
+
+function pollCtx(now: Date) {
+  const minuteSlot = `${localSlot(now)}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return {
+    ctx: { trigger: "poll" as const, now, day: localDay(now), slot: minuteSlot, force: false, runHours: null, baseline: null },
+    minuteSlot,
+  };
+}
+
+describe("M2 — independent segments + poll gates (rev.5 T1/T2/S5)", () => {
+  it("POLL + owner-only leads (leadCount 0) → NO broadcast at all (no owner spam at poll cadence)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api";
+    const now = nextDay();
+    mockCsv.mockResolvedValue({ count: 1, leadCount: 0, phones: ["+17084158984"], csv: "x", csvPath: null });
+    const { ctx } = pollCtx(now);
+    const { rec } = fakeRec(ctx.day, ctx.slot);
+    const res = await runZillowCycle(rec, ctx);
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).not.toHaveBeenCalled();
+  });
+
+  it("SCHEDULED + owner-only (count 1, leadCount 0) → heartbeat broadcast STILL fires (today's behavior preserved)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockCsv.mockResolvedValue({ count: 1, leadCount: 0, phones: ["+17084158984"], csv: "x", csvPath: null });
+    const res = await runDailyAutomation({ now, scheduled: true });
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).toHaveBeenCalledTimes(1);
+  });
+
+  it("POLL + 0 new leads + 1 new applicant → applicant follow-up ONLY (T1: segments decoupled)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = "true";
+    const now = nextDay();
+    mockCsv.mockImplementation(async (opts: { segment?: string }) =>
+      opts?.segment === "applicants"
+        ? { count: 2, leadCount: 1, phones: ["+12245550009", "+17084158984"], csv: "x", csvPath: null }
+        : { count: 1, leadCount: 0, phones: ["+17084158984"], csv: "x", csvPath: null },
+    );
+    mockBroadcastApi.mockResolvedValue({ status: "ok", broadcastId: 9, recipients: 2, sentPhones: ["+12245550009", "+17084158984"] });
+    const { ctx, minuteSlot } = pollCtx(now);
+    const { rec } = fakeRec(ctx.day, ctx.slot);
+    const res = await runZillowCycle(rec, ctx);
+    expect(res.outcome).toBe("ran");
+    expect(mockBroadcastApi).toHaveBeenCalledTimes(1);
+    expect(mockBroadcastApi.mock.calls[0][0].message).toBe("THANKS FOR APPLYING");
+    // Applicant batch keyed off the poll's minute slot; no leads batch exists.
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: `${minuteSlot}:appl` } })).toMatchObject({ status: "sent" });
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: minuteSlot } })).toBeNull();
+  });
+
+  it("LEADS failure does NOT starve the applicant segment (and outcome reports needs_login)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = "true"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockCsv.mockImplementation(async (opts: { segment?: string }) =>
+      opts?.segment === "applicants"
+        ? { count: 1, leadCount: 1, phones: ["+12245550008"], csv: "x", csvPath: null }
+        : { count: 2, leadCount: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: null },
+    );
+    mockBroadcastApi
+      .mockResolvedValueOnce({ status: "needs_login" })
+      .mockResolvedValueOnce({ status: "ok", broadcastId: 3, recipients: 1, sentPhones: ["+12245550008"] });
+    const res = await runDailyAutomation({ now, scheduled: true });
+    expect(res.outcome).toBe("needs_login");
+    expect(mockBroadcastApi).toHaveBeenCalledTimes(2); // applicants attempted despite leads failing
+    const slot = localSlot(now);
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot } })).toMatchObject({ status: "failed" });
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: `${slot}:appl` } })).toMatchObject({ status: "sent" });
+  });
+
+  it("APPLICANT failure does not undo the leads segment (outcome failed, leads batch sent)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = "true"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockCsv.mockImplementation(async (opts: { segment?: string }) =>
+      opts?.segment === "applicants"
+        ? { count: 1, leadCount: 1, phones: ["+12245550008"], csv: "x", csvPath: null }
+        : { count: 2, leadCount: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: null },
+    );
+    mockBroadcastApi
+      .mockResolvedValueOnce({ status: "ok", broadcastId: 4, recipients: 2, sentPhones: ["+12245550001", "+12245550002"] })
+      .mockResolvedValueOnce({ status: "failed", detail: "send 500" });
+    const res = await runDailyAutomation({ now, scheduled: true });
+    expect(res.outcome).toBe("failed");
+    // "send 500" is a SEND-stage failure → M3b quarantines it as ambiguous.
+    expect(res.run?.error).toContain("applicant broadcast ambiguous (quarantined)");
+    const slot = localSlot(now);
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot } })).toMatchObject({ status: "sent" });
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: `${slot}:appl` } })).toMatchObject({ status: "ambiguous" });
+  });
+
+  it("api mode builds CSVs with write:false — no files for either segment (T2)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.applicantRelayEnabled = "true"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockCsv.mockImplementation(async (opts: { segment?: string }) =>
+      opts?.segment === "applicants"
+        ? { count: 1, leadCount: 1, phones: ["+12245550008"], csv: "x", csvPath: null }
+        : { count: 2, leadCount: 2, phones: ["+12245550001", "+12245550002"], csv: "x", csvPath: null },
+    );
+    await runDailyAutomation({ now, scheduled: true });
+    for (const call of mockCsv.mock.calls) expect(call[0]).toMatchObject({ write: false });
+  });
+
+  it("POLL uses its minute slot as the batch key even in legacy window mode (runHours null)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api";
+    const now = nextDay();
+    mockCsv.mockResolvedValue({ count: 2, leadCount: 1, phones: ["+12245550007", "+17084158984"], csv: "x", csvPath: null });
+    mockBroadcastApi.mockResolvedValue({ status: "ok", broadcastId: 5, recipients: 2, sentPhones: ["+12245550007", "+17084158984"] });
+    const { ctx, minuteSlot } = pollCtx(now);
+    const { rec } = fakeRec(ctx.day, ctx.slot);
+    const res = await runZillowCycle(rec, ctx);
+    expect(res.outcome).toBe("ran");
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: minuteSlot } })).toMatchObject({ status: "sent" });
+  });
+});
+
+describe("M3b — ambiguous-send classification + resolution wiring (rev.5 S4)", () => {
+  it("a SEND-stage failure quarantines the batch as 'ambiguous' (never blind-retried)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockBroadcastApi.mockResolvedValue({ status: "failed", detail: "send 500 upstream" });
+    const res = await runDailyAutomation({ now, scheduled: true });
+    expect(res.outcome).toBe("failed");
+    expect(res.run?.error).toContain("ambiguous (quarantined)");
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: localSlot(now) } })).toMatchObject({ status: "ambiguous" });
+  });
+
+  it("an osascript timeout (opaque error) also quarantines", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockBroadcastApi.mockResolvedValue({ status: "failed", detail: "Command failed: osascript timed out" });
+    await runDailyAutomation({ now, scheduled: true });
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: localSlot(now) } })).toMatchObject({ status: "ambiguous" });
+  });
+
+  it("a DRAFT-stage failure stays 'failed' — definitely unsent, retries freely", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.runHours = "10,16,22";
+    const now = nextDay(10);
+    mockBroadcastApi.mockResolvedValue({ status: "failed", detail: "draft 400" });
+    await runDailyAutomation({ now, scheduled: true });
+    expect(await prisma.textEmAllBatch.findUnique({ where: { slot: localSlot(now) } })).toMatchObject({ status: "failed" });
+  });
+
+  it("resolution runs at cycle start on the textemall channel (both api and form modes)", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.runHours = "10,16,22";
+    await runDailyAutomation({ now: nextDay(10), scheduled: true });
+    expect(mockResolveAmbiguity).toHaveBeenCalledTimes(1);
+    cfg.broadcastMethod = null; // form mode
+    await runDailyAutomation({ now: nextDay(10), scheduled: true });
+    expect(mockResolveAmbiguity).toHaveBeenCalledTimes(2);
+  });
+
+  it("a resolution failure holds the quarantine but never blocks the cycle", async () => {
+    cfg.channel = "textemall"; cfg.broadcastMethod = "api"; cfg.runHours = "10,16,22";
+    mockResolveAmbiguity.mockRejectedValue(new Error("probe blew up"));
+    const res = await runDailyAutomation({ now: nextDay(10), scheduled: true });
+    expect(res.outcome).toBe("ran"); // cycle completed despite resolution failing
+    expect(mockBroadcastApi).toHaveBeenCalled();
+  });
+});
+
+describe("M1 — whole-cycle mutex + import-busy (rev.5 S3/U2)", () => {
+  it("concurrent same-slot runs SERIALIZE: the loser waits and sees already_done (not claim_lost)", async () => {
+    const now = nextDay();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // First run's import blocks until we release it — holding the cycle mutex.
+    mockImport.mockImplementationOnce(async () => {
+      await gate;
+      return IMPORT_OK;
+    });
+    const first = runDailyAutomation({ now });
+    await new Promise((r) => setTimeout(r, 20));
+    const secondP = runDailyAutomation({ now }); // must WAIT, not race the claim
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    const [firstRes, secondRes] = await Promise.all([first, secondP]);
+    expect(firstRes.outcome).toBe("ran");
+    expect(secondRes.outcome).toBe("already_done"); // pre-M1 this raced to claim_lost
+    expect(mockImport).toHaveBeenCalledTimes(1);
+  });
+
+  it("a concurrent manual import (runZillowImport throws 'already running') → recorded failed outcome, NO throw", async () => {
+    const now = nextDay();
+    mockImport.mockRejectedValueOnce(new Error("an import is already running"));
+    const res = await runDailyAutomation({ now });
+    expect(res.outcome).toBe("failed"); // retryable — next tick reclaims
+    expect(res.run?.error).toContain("import busy");
+    expect(res.run?.error).toContain("already running");
+    // The slot heals: a retry the same hour succeeds.
+    const retry = await runDailyAutomation({ now });
+    expect(retry.outcome).toBe("ran");
   });
 });

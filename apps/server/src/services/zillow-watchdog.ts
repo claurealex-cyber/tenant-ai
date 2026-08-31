@@ -20,6 +20,7 @@ import { resolveConfig } from "@tenant-ai/shared";
 import { prisma } from "../lib/prisma.js";
 import { getJobState, jobStateAlive, JOB_STALE_MS, type JobState } from "../jobs/scheduler.js";
 import { notifyOnMac } from "./messages-relay.js";
+import { pruneZillowArtifacts } from "./zillow-import.js";
 import { autoConfig, STALE_RUNNING_MS } from "./zillow-auto.js";
 
 /** The hourly tick stamps lastRunAt every hour (run hour or not); older = dead. */
@@ -252,6 +253,16 @@ export function startZillowWatchdog(log: (msg: string) => void): void {
   if (timer) return;
   timer = setInterval(() => {
     watchdogTick(new Date(), log).catch((err) => log(`[zillow-watchdog] error: ${err}`));
+    // Daily retention prune (rev.5 M6) — piggybacks on the always-alive watchdog
+    // interval (NOT inside watchdogTick, which tests invoke against shared-DB
+    // fixtures); internally once-per-day, never blocks the watchdog.
+    pruneZillowArtifacts(new Date())
+      .then((pruned) => {
+        if (pruned && (pruned.runs || pruned.files || pruned.batches)) {
+          log(`[zillow-watchdog] retention prune: ${pruned.runs} import runs, ${pruned.files} raw files, ${pruned.batches} sent batches`);
+        }
+      })
+      .catch((err) => log(`[zillow-watchdog] retention prune failed: ${err}`));
   }, 60_000);
   timer.unref?.();
 }

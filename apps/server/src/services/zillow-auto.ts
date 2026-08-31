@@ -5,10 +5,12 @@ import { runZillowImport } from "./zillow-import.js";
 import { sendSurveyBatch } from "./zillow-send.js";
 import { buildTextEmAllCsv } from "./textemall-csv.js";
 import { setGroupViaApi, groupIdFromUrl } from "./textemall-api.js";
-import { sendBroadcastViaApi } from "./textemall-broadcast-api.js";
+import { sendBroadcastViaApi, classifyBroadcastFailure } from "./textemall-broadcast-api.js";
+import { resolveAmbiguousBatches } from "./textemall-ambiguity.js";
 import { resolveBroadcastMethod } from "./delivery-method.js";
 import { fireTextEmAllTrigger } from "./textemall-trigger.js";
 import { withGuiLock } from "../lib/gui-lock.js";
+import { runExclusiveCycle } from "./zillow-cycle.js";
 
 /**
  * Daily Zillow automation: import new leads, text status-`new` leads the
@@ -208,18 +210,89 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
 
   const day = localDay(now);
   const slot = localSlot(now);
-  const claim = await claimSlot(slot, day, force, now);
-  if (claim === "already_done") {
-    const row = await prisma.zillowAutoRun.findUnique({ where: { slot } });
-    return { outcome: "already_done", run: row ? toRunSummary(row) : undefined };
-  }
-  if (claim === null) return { outcome: "claim_lost" };
+  // Whole-cycle serialization (S3/U2): the claim + import + send run under the
+  // in-process cycle mutex, so a manual auto-run and the hourly tick can never
+  // interleave their send phases (wait-mode: the later caller queues briefly).
+  return runExclusiveCycle("wait", async () => {
+    const claim = await claimSlot(slot, day, force, now);
+    if (claim === "already_done") {
+      const row = await prisma.zillowAutoRun.findUnique({ where: { slot } });
+      return { outcome: "already_done" as const, run: row ? toRunSummary(row) : undefined };
+    }
+    if (claim === null) return { outcome: "claim_lost" as const };
+    const rec: RunRecorder = { finish: (status, patch) => finishRow(claim, status, patch) };
+    return runZillowCycle(rec, {
+      trigger: opts.scheduled ? "scheduled" : "manual",
+      now,
+      day,
+      slot,
+      force,
+      runHours,
+      baseline,
+    });
+  });
+}
+
+/** What runZillowCycle needs to record an outcome — implemented eagerly by the
+ *  claimed ZillowAutoRun row (scheduled/manual) and lazily by the poll driver
+ *  (M3: persists a minute-slot row only when something actually happened, but
+ *  ALWAYS returns the row-shaped summary so the cycle body needs no guards). */
+export interface RunRecorder {
+  finish(
+    status: "done" | "needs_login" | "failed",
+    patch: {
+      error?: string | null;
+      importRunId?: string;
+      leadsFound?: number;
+      leadsNewDelta?: number;
+      queuedDelta?: number;
+      sentDelta?: number;
+    },
+  ): Promise<Parameters<typeof toRunSummary>[0]>;
+}
+
+export interface CycleContext {
+  trigger: "scheduled" | "manual" | "poll";
+  now: Date;
+  day: string;
+  /** Broadcast idempotence key: hour slot for scheduled/manual, minute slot for poll. */
+  slot: string;
+  force: boolean;
+  runHours: number[] | null;
+  baseline: Date | null;
+}
+
+/**
+ * ONE Zillow cycle: import (scrape) → send branch (relay, or Text-Em-All with
+ * its leads + applicant segments). Extracted from runDailyAutomation (S1) so
+ * the fast poll can run cycles WITHOUT the hour-slot claim. Callers hold the
+ * cycle mutex; this function itself takes no cycle/GUI lock at this level (S2).
+ */
+export async function runZillowCycle(rec: RunRecorder, ctx: CycleContext): Promise<AutoRunResult> {
+  const { now, day, slot, force, runHours, baseline } = ctx;
 
   // ── Import ──
-  const importSummary = await runZillowImport();
+  // A concurrent MANUAL import (/internal/zillow/import) makes runZillowImport
+  // THROW ("already running"). That must be a recorded, retryable outcome — not
+  // an escape through the poll driver or a 500 on the auto-run route (U2).
+  let importSummary: Awaited<ReturnType<typeof runZillowImport>>;
+  try {
+    // Poll cycles skip the raw-JSON snapshot (rev.5 M6 — hundreds/day otherwise);
+    // scheduled/manual runs keep it as the audit trail.
+    importSummary = await runZillowImport({ persistRaw: ctx.trigger !== "poll" });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    importSummary = {
+      runId: "",
+      status: "failed",
+      leadsFound: 0,
+      leadsNew: 0,
+      error: /already running/i.test(msg) ? `import busy: ${msg}` : `import threw: ${msg}`,
+    };
+  }
   if (importSummary.status === "failed") {
     const isLogin = (importSummary.error ?? "").includes("needs-login");
-    const row = await finishRow(claim, isLogin ? "needs_login" : "failed", {
+    const row = await rec.finish(isLogin ? "needs_login" : "failed", {
       error: importSummary.error?.slice(0, 500) ?? "import failed",
     });
     return { outcome: isLogin ? "needs_login" : "failed", run: toRunSummary(row) };
@@ -237,12 +310,15 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       //  • legacy hourly mode → a once/day key pinned to broadcast_hour, so the
       //    contract stays "one broadcast per day at/after that hour".
       let broadcastSlot: string;
-      if (runHours) {
+      if (runHours || ctx.trigger === "poll") {
+        // Fixed run hours use the hour slot; a POLL cycle always uses its own
+        // minute-granular slot (even in legacy window mode) so polling is never
+        // throttled by the daily key (rev.5 S1).
         broadcastSlot = slot;
       } else {
         const bh = clampHour(await resolveConfig("zillow", "textemall_broadcast_hour"), 12);
         if (!force && now.getHours() < bh) {
-          const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+          const row = await rec.finish("done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
           return { outcome: "ran", run: toRunSummary(row) };
         }
         broadcastSlot = `${day}T${String(bh).padStart(2, "0")}`;
@@ -254,7 +330,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // tick (hourly mode) or same-slot reclaim (fixed mode) retries it.
       const already = await prisma.textEmAllBatch.findUnique({ where: { slot: broadcastSlot } });
       if (already && !force && (already.status === "sent" || already.status === "uploaded")) {
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+        const row = await rec.finish("done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
         return { outcome: "ran", run: toRunSummary(row) };
       }
       // Free-tier soft cap (risk 1): count broadcasts already SENT this calendar
@@ -265,6 +341,12 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       // ONLY to the Google-Form → Zapier path. The direct-API broadcast uses no
       // Zapier, so it is exempt (Text-Em-All credits are the only cost there).
       const apiMode = (await resolveBroadcastMethod("zillow")) === "api";
+      // M3b: resolve any AMBIGUOUS batches (send timed out mid-flight — TEA may
+      // or may not have broadcast) BEFORE building CSVs: promoted batches flip
+      // their leads (no re-text), demoted ones free their phones for THIS cycle.
+      // A probe failure keeps the quarantine — the CSV dedupe excludes ambiguous.
+      await resolveAmbiguousBatches(now).catch((e) =>
+        console.warn(`[zillow-auto] ambiguity resolution failed (quarantine holds): ${e}`));
       if (!apiMode) {
         const monthCap = clampCount(await resolveConfig("textemall", "monthly_fire_cap"), DEFAULT_MONTHLY_FIRE_CAP);
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -274,78 +356,90 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
         });
         if (sentThisMonth >= monthCap && !force) {
           console.warn(`[zillow-auto] textemall: monthly fire cap reached (${sentThisMonth}/${monthCap}) — NOT broadcasting. Raise textemall.monthly_fire_cap to override.`);
-          const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+          const row = await rec.finish("done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
           return { outcome: "ran", run: toRunSummary(row) };
         }
       }
       const applicantRelayEnabled = (await resolveConfig("textemall", "applicant_relay_enabled")) === "true";
-      // Exclude applicants from the LEAD broadcast ONLY when the applicant relay is
-      // on (else an applicant who is a new lead would get neither message).
-      const csv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, excludeApplicants: applicantRelayEnabled });
-      if (csv.count === 0 || !csv.csvPath) {
-        // Empty-batch skip (§2d #11): no delete, no upload, no broadcast.
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
-        return { outcome: "ran", run: toRunSummary(row) };
-      }
       const group = (await resolveConfig("zillow", "textemall_group")) ?? "Ghem leads";
       const groupUrl = (await resolveConfig("zillow", "textemall_group_url")) ?? undefined;
-      const batchRow = await prisma.textEmAllBatch.upsert({
-        where: { slot: broadcastSlot },
-        create: { slot: broadcastSlot, day, groupName: group, phones: csv.phones, count: csv.count, status: "built", csvPath: csv.csvPath },
-        update: { phones: csv.phones, count: csv.count, status: "built", csvPath: csv.csvPath, error: null },
-      });
-
-      // Strict order (§2d #5, rev.3 C): GUI-locked group-set → verify → fire
-      // trigger → stamp batch SENT before flipping leads. DETERMINISTIC path —
-      // sets the group via the Text-Em-All REST API (authenticated XHR in the
-      // logged-in Safari tab), NOT the fragile iris GUI drive. Seconds, not minutes.
 
       // broadcast_method toggle: "api" sends the broadcast DIRECTLY via the
       // Text-Em-All REST API (recipients by phone; no group, no Google Form, no
       // Zapier, no 100/mo cap, and no existing-contact 422 bug). "form" (default)
       // preserves the group-edit + Google-Form → Zap path.
       if (apiMode) {
-        const message = (await resolveConfig("textemall", "broadcast_message")) ??
-          "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
-        const bc = await withGuiLock("textemall-api", () => sendBroadcastViaApi({ phones: csv.phones, message }));
-        if (bc.status !== "ok") {
-          const detail = bc.status === "needs_login" ? "needs-login" : (bc as { detail?: string }).detail ?? "failed";
-          await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "failed", error: `broadcast ${bc.status}: ${detail}`.slice(0, 500) } });
-          const row = await finishRow(claim, bc.status === "needs_login" ? "needs_login" : "failed", { error: `textemall broadcast ${bc.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
-          return { outcome: bc.status === "needs_login" ? "needs_login" : "failed", run: toRunSummary(row) };
-        }
-        await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "sent", phones: bc.sentPhones } });
-        // Flip ONLY the leads that ACTUALLY made it into the broadcast (bc.sentPhones),
-        // not the whole intended batch — a lead whose add failed must NOT be marked
-        // sent (it'll be re-attempted next run). Match on E.164 or 10-digit.
-        const sentDigits = new Set(bc.sentPhones.map((p) => p.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")));
-        const toFlip = await prisma.zillowLead.findMany({
-          where: { phone: { in: csv.phones }, status: "new" }, select: { id: true, phone: true },
-        });
-        const flipIds = toFlip.filter((l) => sentDigits.has((l.phone ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""))).map((l) => l.id);
-        if (flipIds.length) {
-          await prisma.zillowLead.updateMany({
-            where: { id: { in: flipIds } },
-            data: { status: "invited", sentVia: "textemall", sentBatchId: batchRow.id },
-          }).catch((e) => console.error("textemall lead flip failed (broadcast already sent, safe):", e));
-        }
-        console.log(`[zillow-auto] textemall API broadcast ${bc.broadcastId} → ${bc.recipients} recipient(s); flipped ${flipIds.length} lead(s).`);
+        // ── API mode: TWO INDEPENDENT SEGMENTS (rev.5 T1) — a leads failure or
+        // skip must never starve the applicant follow-up, and vice versa. Each
+        // segment has its own gate, batch row, and error handling. API sends go
+        // by phone, so NO CSV file is written for either segment (rev.5 T2).
+        const segErrors: string[] = [];
+        let sawNeedsLogin = false;
+        let queuedTotal = 0;
+        let sentTotal = 0;
 
-        // ── Applicant segment (toggleable, api-mode only): message people who
-        // ACTUALLY APPLIED with a distinct follow-up. Gated on applicant_relay_enabled
-        // and on there being GENUINE new applicants (never an owner-only send —
-        // realtime-plan lesson). Dedup via applicantSentBatchId, independent of the
-        // lead segment, so someone texted earlier as a lead still gets the follow-up.
-        let applicantsSent = 0;
+        // ── Segment 1: LEADS ──
+        // Exclude applicants from the LEAD broadcast ONLY when the applicant
+        // relay is on (else an applicant who is a new lead gets neither message).
+        const csv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, excludeApplicants: applicantRelayEnabled, write: false });
+        // Send gate (rev.5 S5): a POLL cycle broadcasts only for GENUINE new
+        // leads (leadCount excludes the owner-check row) — never an owner-only
+        // heartbeat at poll cadence. Scheduled/manual keep the count gate, so
+        // the owner's existing 3×/day heartbeat behavior is preserved untouched.
+        const leadsGate = ctx.trigger === "poll" ? csv.leadCount > 0 : csv.count > 0;
+        if (leadsGate) {
+          const message = (await resolveConfig("textemall", "broadcast_message")) ??
+            "Hello, thank you for reaching out to Ghem Properties. Please fill out our application and we will get back to you shortly.";
+          const batchRow = await prisma.textEmAllBatch.upsert({
+            where: { slot: broadcastSlot },
+            create: { slot: broadcastSlot, day, groupName: group, phones: csv.phones, count: csv.count, status: "built", csvPath: null },
+            update: { phones: csv.phones, count: csv.count, status: "built", csvPath: null, error: null },
+          });
+          const bc = await withGuiLock("textemall-api", () => sendBroadcastViaApi({ phones: csv.phones, message }));
+          if (bc.status !== "ok") {
+            const detail = bc.status === "needs_login" ? "needs-login" : (bc as { detail?: string }).detail ?? "failed";
+            // Stage classification (M3b): a pre-send failure retries freely; a
+            // possibly-sent failure QUARANTINES (ambiguous) until resolution.
+            const ambiguous = bc.status === "failed" && classifyBroadcastFailure(detail) === "ambiguous";
+            await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: ambiguous ? "ambiguous" : "failed", error: `broadcast ${bc.status}: ${detail}`.slice(0, 500) } });
+            sawNeedsLogin ||= bc.status === "needs_login";
+            segErrors.push(`leads broadcast ${ambiguous ? "ambiguous (quarantined)" : bc.status}`);
+          } else {
+            await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "sent", phones: bc.sentPhones } });
+            // Flip ONLY the leads that ACTUALLY made it into the broadcast
+            // (bc.sentPhones) — a lead whose add failed must NOT be marked sent
+            // (it'll be re-attempted next run). Match on E.164 or 10-digit.
+            const sentDigits = new Set(bc.sentPhones.map((p) => p.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")));
+            const toFlip = await prisma.zillowLead.findMany({
+              where: { phone: { in: csv.phones }, status: "new" }, select: { id: true, phone: true },
+            });
+            const flipIds = toFlip.filter((l) => sentDigits.has((l.phone ?? "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, ""))).map((l) => l.id);
+            if (flipIds.length) {
+              await prisma.zillowLead.updateMany({
+                where: { id: { in: flipIds } },
+                data: { status: "invited", sentVia: "textemall", sentBatchId: batchRow.id },
+              }).catch((e) => console.error("textemall lead flip failed (broadcast already sent, safe):", e));
+            }
+            queuedTotal += bc.recipients;
+            sentTotal += flipIds.length;
+            console.log(`[zillow-auto] textemall API broadcast ${bc.broadcastId} → ${bc.recipients} recipient(s); flipped ${flipIds.length} lead(s).`);
+          }
+        }
+
+        // ── Segment 2: APPLICANTS (INDEPENDENT of segment 1) ──
+        // Message people who ACTUALLY APPLIED with a distinct follow-up. Gated
+        // on applicant_relay_enabled and on GENUINE new applicants (never an
+        // owner-only send). Dedup via applicantSentBatchId — independent of the
+        // lead segment, so someone texted earlier as a lead still gets it.
         if (applicantRelayEnabled) {
           const applCsv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, segment: "applicants", write: false });
-          if (applCsv.leadCount > 0) { // API path sends by phone; no CSV file needed
+          if (applCsv.leadCount > 0) {
             const applMsg = (await resolveConfig("textemall", "applicant_broadcast_message")) ??
               "Hi! Thanks for submitting your application with Ghem Properties — we've received it and will follow up with next steps shortly. Reply here with any questions.";
             const applBatch = await prisma.textEmAllBatch.upsert({
               where: { slot: `${broadcastSlot}:appl` },
-              create: { slot: `${broadcastSlot}:appl`, day, groupName: "applicants", phones: applCsv.phones, count: applCsv.count, status: "built", csvPath: applCsv.csvPath },
-              update: { phones: applCsv.phones, count: applCsv.count, status: "built", csvPath: applCsv.csvPath, error: null },
+              create: { slot: `${broadcastSlot}:appl`, day, groupName: "applicants", phones: applCsv.phones, count: applCsv.count, status: "built", csvPath: null },
+              update: { phones: applCsv.phones, count: applCsv.count, status: "built", csvPath: null, error: null },
             });
             const abc = await withGuiLock("textemall-api", () => sendBroadcastViaApi({ phones: applCsv.phones, message: applMsg }));
             if (abc.status === "ok") {
@@ -359,19 +453,52 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
                 await prisma.zillowLead.updateMany({ where: { id: { in: aIds } }, data: { applicantSentBatchId: applBatch.id, applicantInvitedAt: now } })
                   .catch((e) => console.error("applicant mark failed (broadcast already sent, safe):", e));
               }
-              applicantsSent = aIds.length;
-              console.log(`[zillow-auto] applicant follow-up broadcast ${abc.broadcastId} → ${abc.recipients} recipient(s); marked ${applicantsSent} applicant(s).`);
+              queuedTotal += abc.recipients;
+              sentTotal += aIds.length;
+              console.log(`[zillow-auto] applicant follow-up broadcast ${abc.broadcastId} → ${abc.recipients} recipient(s); marked ${aIds.length} applicant(s).`);
             } else {
-              await prisma.textEmAllBatch.update({ where: { id: applBatch.id }, data: { status: "failed", error: `applicant broadcast ${abc.status}`.slice(0, 500) } });
+              const aDetail = abc.status === "needs_login" ? "needs-login" : (abc as { detail?: string }).detail ?? "failed";
+              const aAmbiguous = abc.status === "failed" && classifyBroadcastFailure(aDetail) === "ambiguous";
+              await prisma.textEmAllBatch.update({ where: { id: applBatch.id }, data: { status: aAmbiguous ? "ambiguous" : "failed", error: `applicant broadcast ${abc.status}: ${aDetail}`.slice(0, 500) } });
+              sawNeedsLogin ||= abc.status === "needs_login";
+              segErrors.push(`applicant broadcast ${aAmbiguous ? "ambiguous (quarantined)" : abc.status}`);
               console.warn(`[zillow-auto] applicant broadcast failed: ${abc.status} — leads segment unaffected.`);
             }
           }
         }
 
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: bc.recipients + applicantsSent, sentDelta: flipIds.length + applicantsSent });
-        return { outcome: "ran", run: toRunSummary(row) };
+        // Aggregate outcome: any needs_login wins (Safari re-login heals both
+        // segments next cycle); else any segment error → failed (retryable);
+        // else done — including the both-segments-skipped empty cycle.
+        const status = sawNeedsLogin ? "needs_login" : segErrors.length ? "failed" : "done";
+        const row = await rec.finish(status, {
+          ...(segErrors.length ? { error: `textemall ${segErrors.join("; ")}` } : {}),
+          importRunId: importSummary.runId,
+          leadsFound: importSummary.leadsFound,
+          leadsNewDelta: importSummary.leadsNew,
+          queuedDelta: queuedTotal,
+          sentDelta: sentTotal,
+        });
+        return { outcome: status === "done" ? "ran" : status, run: toRunSummary(row) };
       }
 
+      // ── Form/Zapier mode (unchanged behavior) ──
+      const csv = await buildTextEmAllCsv({ baseline: baseline ?? undefined, excludeApplicants: applicantRelayEnabled });
+      if (csv.count === 0 || !csv.csvPath) {
+        // Empty-batch skip (§2d #11): no delete, no upload, no broadcast.
+        const row = await rec.finish("done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+        return { outcome: "ran", run: toRunSummary(row) };
+      }
+      const batchRow = await prisma.textEmAllBatch.upsert({
+        where: { slot: broadcastSlot },
+        create: { slot: broadcastSlot, day, groupName: group, phones: csv.phones, count: csv.count, status: "built", csvPath: csv.csvPath },
+        update: { phones: csv.phones, count: csv.count, status: "built", csvPath: csv.csvPath, error: null },
+      });
+
+      // Strict order (§2d #5, rev.3 C): GUI-locked group-set → verify → fire
+      // trigger → stamp batch SENT before flipping leads. DETERMINISTIC path —
+      // sets the group via the Text-Em-All REST API (authenticated XHR in the
+      // logged-in Safari tab), NOT the fragile iris GUI drive. Seconds, not minutes.
       const groupId = groupIdFromUrl(groupUrl);
       const upload = groupId
         ? await withGuiLock("textemall-api", () => setGroupViaApi({ groupId, phones: csv.phones }))
@@ -379,7 +506,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
       if (upload.status !== "ok") {
         const detail = upload.status === "needs_login" ? "needs-login" : (upload as { detail?: string }).detail ?? "failed";
         await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "failed", error: `group-set ${upload.status}: ${detail}`.slice(0, 500) } });
-        const row = await finishRow(claim, upload.status === "needs_login" ? "needs_login" : "failed", { error: `textemall ${upload.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+        const row = await rec.finish(upload.status === "needs_login" ? "needs_login" : "failed", { error: `textemall ${upload.status}`, importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
         return { outcome: upload.status === "needs_login" ? "needs_login" : "failed", run: toRunSummary(row) };
       }
 
@@ -389,7 +516,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
         // "uploaded" (operator can fire manually); do NOT flip leads.
         await prisma.textEmAllBatch.update({ where: { id: batchRow.id }, data: { status: "uploaded" } });
         console.log(`[zillow-auto] textemall: uploaded ${csv.count} contacts; broadcast NOT fired (${(trig as any).reason}). Arm textemall.trigger_armed=true to broadcast.`);
-        const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
+        const row = await rec.finish("done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew });
         return { outcome: "ran", run: toRunSummary(row) };
       }
 
@@ -400,13 +527,13 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
         where: { phone: { in: csv.phones }, status: "new" },
         data: { status: "invited", sentVia: "textemall", sentBatchId: batchRow.id },
       }).catch((e) => console.error("textemall lead flip failed (batch already sent, safe):", e));
-      const row = await finishRow(claim, "done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: csv.count, sentDelta: csv.count });
+      const row = await rec.finish("done", { importRunId: importSummary.runId, leadsFound: importSummary.leadsFound, leadsNewDelta: importSummary.leadsNew, queuedDelta: csv.count, sentDelta: csv.count });
       return { outcome: "ran", run: toRunSummary(row) };
     }
 
     // ── relay (default, unchanged) ──
     const batch = await sendSurveyBatch({ sinceDate: baseline ?? undefined });
-    const row = await finishRow(claim, "done", {
+    const row = await rec.finish("done", {
       importRunId: importSummary.runId,
       leadsFound: importSummary.leadsFound,
       leadsNewDelta: importSummary.leadsNew,
@@ -415,7 +542,7 @@ export async function runDailyAutomation(opts: RunOptions = {}): Promise<AutoRun
     });
     return { outcome: "ran", run: toRunSummary(row) };
   } catch (err) {
-    const row = await finishRow(claim, "failed", {
+    const row = await rec.finish("failed", {
       error: `batch failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
       importRunId: importSummary.runId,
       leadsFound: importSummary.leadsFound,

@@ -141,7 +141,7 @@ export function zillowOutDir(): string {
  * row is created first so a crash still leaves an inspectable "running" row
  * (marked failed on the next run's stale check).
  */
-export async function runZillowImport(): Promise<ImportSummary> {
+export async function runZillowImport(opts: { persistRaw?: boolean } = {}): Promise<ImportSummary> {
   if (importRunning) {
     throw new Error("an import is already running");
   }
@@ -155,7 +155,7 @@ export async function runZillowImport(): Promise<ImportSummary> {
 
     const run = await prisma.zillowImportRun.create({ data: { status: "running" } });
     try {
-      const extraction = await withGuiLock("zillow-safari-import", () => runZillowExtraction({ outDir: zillowOutDir() }));
+      const extraction = await withGuiLock("zillow-safari-import", () => runZillowExtraction({ outDir: zillowOutDir(), persistRaw: opts.persistRaw }));
       const summary = await ingestLeads(run.id, extraction.leads);
       await prisma.zillowImportRun.update({
         where: { id: run.id },
@@ -163,7 +163,7 @@ export async function runZillowImport(): Promise<ImportSummary> {
           status: "done",
           leadsFound: summary.leadsFound,
           leadsNew: summary.leadsNew,
-          rawJsonPath: extraction.rawJsonPath,
+          rawJsonPath: extraction.rawJsonPath || null,
           finishedAt: new Date(),
         },
       });
@@ -311,4 +311,79 @@ export function leadsToCsv(
     ].join(","),
   );
   return [header, ...rows].join("\n") + "\n";
+}
+
+// ── Retention prune (rev.5 M6) ──────────────────────────────────────────────
+
+let lastPruneDay = "";
+
+/** Test hook: allow re-running the daily prune within one process. */
+export function _resetPruneDay(): void {
+  lastPruneDay = "";
+}
+
+/**
+ * Once-per-day retention prune (called from the watchdog interval):
+ *  - ZillowImportRun rows older than `zillow.import_retention_days` (default 14)
+ *    are deleted ONLY when no ZillowLead still references them (FK safety —
+ *    a lead keeps its origin run forever).
+ *  - leads-raw-*.json files older than the same window are unlinked.
+ *  - SENT TextEmAllBatch rows older than `zillow.batch_retention_days`
+ *    (default 90) are deleted — matching the CSV dedupe window, so pruning can
+ *    never remove a batch the dedupe still relies on. `ambiguous` batches are
+ *    NEVER pruned (their quarantine must outlive any window).
+ */
+export async function pruneZillowArtifacts(
+  now: Date = new Date(),
+): Promise<{ runs: number; files: number; batches: number } | null> {
+  const day = now.toISOString().slice(0, 10);
+  if (day === lastPruneDay) return null;
+  lastPruneDay = day;
+
+  const intDays = (raw: string | null, def: number) => {
+    const n = parseInt(raw ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : def;
+  };
+  const importDays = intDays(await resolveConfig("zillow", "import_retention_days"), 14);
+  const batchDays = intDays(await resolveConfig("zillow", "batch_retention_days"), 90);
+  const importCutoff = new Date(now.getTime() - importDays * 86_400_000);
+  const batchCutoff = new Date(now.getTime() - batchDays * 86_400_000);
+
+  // Import runs: only lead-less rows (leads keep their FK forever).
+  const oldRuns = await prisma.zillowImportRun.findMany({
+    where: { startedAt: { lt: importCutoff }, leads: { none: {} } },
+    select: { id: true },
+  });
+  const runs = oldRuns.length
+    ? (await prisma.zillowImportRun.deleteMany({ where: { id: { in: oldRuns.map((r) => r.id) } } })).count
+    : 0;
+
+  // Raw JSON snapshots by file mtime.
+  let files = 0;
+  try {
+    const { readdir, stat, unlink } = await import("node:fs/promises");
+    const path = await import("node:path");
+    const dir = zillowOutDir();
+    for (const f of await readdir(dir)) {
+      if (!f.startsWith("leads-raw-") || !f.endsWith(".json")) continue;
+      const p = path.join(dir, f);
+      try {
+        const st = await stat(p);
+        if (st.mtimeMs < importCutoff.getTime()) {
+          await unlink(p);
+          files++;
+        }
+      } catch {
+        /* file vanished mid-scan — fine */
+      }
+    }
+  } catch {
+    /* no out dir yet — nothing to prune */
+  }
+
+  const batches = (
+    await prisma.textEmAllBatch.deleteMany({ where: { status: "sent", createdAt: { lt: batchCutoff } } })
+  ).count;
+
+  return { runs, files, batches };
 }

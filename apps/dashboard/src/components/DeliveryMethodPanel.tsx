@@ -19,7 +19,7 @@ interface RoutingStatus {
 const OPTIONS: { value: Method; label: string; hint: string }[] = [
   { value: "imessage", label: "Apple iMessage relay", hint: "Send from your Mac's Messages app (Telnyx if relay off)." },
   { value: "zapier", label: "Text-Em-All · Google Form", hint: "Group edit → Google Form → Zapier (100 tasks/mo free tier)." },
-  { value: "api", label: "Text-Em-All · Direct API", hint: "Send straight through the Text-Em-All API — no Zapier, no cap." },
+  { value: "api", label: "Text-Em-All · Direct API", hint: "Send straight through the Text-Em-All API — no Zapier, no cap. Unlocks real-time Zillow polling." },
 ];
 
 /** Map a lane's resolved transport+method to the 3-way control value. */

@@ -56,6 +56,20 @@ interface AutoStatus {
   };
   /** false = the hourly tick is dead (Redis / job not registered): nothing scheduled will fire. */
   schedulerOnline?: boolean;
+  /** Real-time (fast-poll) status — present on rev.5+ servers. */
+  realtime?: {
+    active: boolean;
+    fastPollSec: number;
+    windowStartHour: number;
+    windowEndHour: number;
+    inWindow: boolean;
+    lastPollAt: string | null;
+    lastOutcome: string | null;
+    lastReason: string;
+    sentToday: number;
+    maxPerDay: number;
+    ambiguousCount: number;
+  };
 }
 
 /** Prefer the server's label; fall back to the local one for older servers. */
@@ -231,6 +245,24 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
           <span className="font-semibold">Scheduled runs are NOT firing.</span> The hourly scheduler is offline
           (Redis down or the job never registered). Nothing on the schedule below will run until Tenant AI is
           restarted with Redis up. &quot;Run now&quot; still works.
+        </div>
+      )}
+      {status.realtime?.active && (
+        <div className="rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          <span className="font-semibold">Real-time mode:</span> Zillow scrape every ~
+          {Math.max(1, Math.round(status.realtime.fastPollSec / 60))} min,{" "}
+          {String(status.realtime.windowStartHour).padStart(2, "0")}:00–
+          {String(status.realtime.windowEndHour).padStart(2, "0")}:59
+          {status.realtime.lastPollAt
+            ? ` · last poll ${new Date(status.realtime.lastPollAt).toLocaleTimeString()}`
+            : " · no poll yet"}
+          {` · sent today ${status.realtime.sentToday}${status.realtime.maxPerDay ? `/${status.realtime.maxPerDay}` : ""}`}
+          <span className="text-emerald-700"> (setting changes apply within a minute)</span>
+          {status.realtime.ambiguousCount > 0 && (
+            <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+              {status.realtime.ambiguousCount} unverified broadcast{status.realtime.ambiguousCount > 1 ? "s" : ""} on hold
+            </span>
+          )}
         </div>
       )}
 

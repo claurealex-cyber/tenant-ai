@@ -7,6 +7,7 @@ import { prisma } from "../lib/prisma.js";
 import { runZillowImport, leadsToCsv } from "../services/zillow-import.js";
 import { sendSurveyToLead, sendSurveyBatch } from "../services/zillow-send.js";
 import { runDailyAutomation, getAutoStatus } from "../services/zillow-auto.js";
+import { getPollStatus } from "../services/zillow-poll.js";
 
 /**
  * Internal endpoints. "Localhost-only" is meaningless behind the tunnel (every
@@ -153,8 +154,14 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
     "/internal/zillow/auto-run",
     { preHandler: requireInternalSecret },
     async (request, reply: FastifyReply) => {
-      const result = await runDailyAutomation({ force: request.body?.force === true });
-      return reply.send(result);
+      try {
+        const result = await runDailyAutomation({ force: request.body?.force === true });
+        return reply.send(result);
+      } catch (err) {
+        // Infra-level failure only (DB down etc.) — domain failures are return
+        // values. Report JSON instead of a bare 500 crash page (U2).
+        return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
+      }
     },
   );
 
@@ -162,7 +169,8 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
     "/internal/zillow/auto-status",
     { preHandler: requireInternalSecret },
     async (_request, reply: FastifyReply) => {
-      return reply.send(await getAutoStatus());
+      const [status, realtime] = await Promise.all([getAutoStatus(), getPollStatus()]);
+      return reply.send({ ...status, realtime });
     },
   );
 
