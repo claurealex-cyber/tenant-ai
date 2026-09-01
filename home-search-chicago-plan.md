@@ -90,3 +90,42 @@ everything, decouple the DATA from the ALERTS:
    names? (Community areas are cleaner to map to ZIPs.)
 2. Property scope: condos only (current) or include single-family/multi/townhome?
 3. Sweep cadence + neighborhoods-per-run, tuned to the Brave tier you are on.
+
+---
+
+## Workflow improvements from the Rogers Park comparison (2026-09-01)
+A Fable agent searched Rogers Park across ALL property types with call logging and
+compared to the tab's pipeline. Key findings, ranked by impact:
+
+1. **Index-page-first, not snippet-search (biggest win).** ONE fetch of
+   `movoto.com/chicago-il/{slug}/` returned 50 structured listings (price/addr/unit/
+   beds/baths/sqft/type/status); one `compass.com/homes-for-sale/{slug}-chicago-il/`
+   returned all 45 with type + Coming-Soon. SEVEN Brave queries produced ~20 partly-
+   stale snippet listings. → Make discover() FETCH the readable neighborhood index
+   pages first; Brave becomes the fallback (find index URLs / addresses they miss).
+2. **All property types, not "condos".** Condos-only missed 100% of single-family
+   (8 in RP, $475k–$795k), all multi-family ($549k–$5.7M), townhomes, land. Add
+   Movoto type sub-indexes (`/for-sale/chicago-il/{slug}/single-family`, `/condos/`)
+   + the main index for multi.
+3. **Drop the mandatory price cap (or per-type).** A condo-tuned cap (~$300k)
+   excludes every non-condo — cheapest SFH was $475k. Store all, filter in UI.
+4. **Never trust snippet "active"/price — confirm on a 200-fetched page.** Live
+   failure: a snippet said 7228 N Rogers "$415,000 listed"; the page says delisted
+   01/31, and $415k isn't even in its price history. Snippet prices drifted $10–20k.
+5. **ZIP↔neighborhood mapping.** 60645 ≈ West Ridge, not Rogers Park — portals index
+   by neighborhood slug. Map each ZIP → slug(s) and scan each index.
+6. **Update source lists from reality:** confirmed 403 today — zillow, redfin,
+   homes.com, chicagospropertyshop. **@properties fetches 200 but is JS-rendered
+   (stats-only, no prices) → stop wasting a verify fetch on it.** **PropertyRocks
+   returned ZERO Rogers Park inventory → drop/deprioritize.**
+7. **Classify type from signals, don't inherit labels** (Compass called a 12-unit
+   "Single-Family"; Movoto vs Compass disagree condo/townhome/multi). Beds/unit-count
+   ⇒ multi; unit suffix ⇒ condo; source label = tiebreaker; store disagreements.
+8. **Dedup gotchas seen live:** fractional street #s (7031.5), Ave/Dr/Ter variants,
+   unit folded into street (CCF), address ranges for multis (pick low #),
+   "Undisclosed" rows (key on price+beds+sqft+zip), two same-price units in one
+   building (don't collapse). Normalize suffix OUT of the key, keep for display.
+9. **Index pagination + Compass Coming-Soon:** indexes page (Movoto 50/85); only
+   Compass exposes Coming-Soon (early-warning inventory) — keep it in the scan.
+10. **Best Brave templates:** `site:movoto.com {hood} Chicago for sale` (finds index
+    + sub-indexes + detail URLs) and `{hood} Chicago multi family building for sale {zip}`.
