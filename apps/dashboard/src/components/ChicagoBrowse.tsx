@@ -68,6 +68,7 @@ export default function ChicagoBrowse() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d?.error || `sweep ${r.status}`);
       const s = d.sweep || {};
+      if (s.skipped) { setMsg("A compile is already running — try again in a moment."); return; }
       setMsg(`Swept ${(s.areasSwept || []).length} area(s): ${s.newRows ?? 0} new, ${s.verified ?? 0} verified.`);
       await load();
     } catch (e) { setMsg(e instanceof Error ? e.message : "sweep failed"); }
@@ -85,7 +86,7 @@ export default function ChicagoBrowse() {
         </div>
         <div className="flex flex-wrap gap-2">
           {sel.size > 0 && (
-            <button onClick={() => sweep({ areas: [...sel] }, `${sel.size} selected area(s)`)} disabled={busy}
+            <button onClick={() => { const b = [...sel].slice(0, 8); sweep({ areas: b }, `${b.length} selected area(s)${sel.size > 8 ? " (first 8 — select fewer for the rest)" : ""}`); }} disabled={busy}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">Compile selected ({sel.size})</button>
           )}
           <button onClick={() => sweep({ areas: clusters[0]?.areas ?? [] }, "Wicker Park area")} disabled={busy}

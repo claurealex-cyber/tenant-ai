@@ -43,6 +43,19 @@ describe("home-search city-wide sweep", () => {
     expect(r.areasSwept).toHaveLength(2);
   });
 
+  it("concurrency guard: a second sweep started while one runs is SKIPPED", async () => {
+    const slow = () => ({
+      name: "slow",
+      async discover() { await new Promise((r) => setTimeout(r, 60)); return []; },
+      async verify() { return null; },
+    });
+    const [a, b] = await Promise.all([
+      runSweep({ areas: ["Wicker Park"], providerFor: slow as any }),
+      runSweep({ areas: ["Bucktown"], providerFor: slow as any }),
+    ]);
+    expect([a, b].filter((x) => x.skipped)).toHaveLength(1); // exactly one skipped
+  });
+
   it("explicit areas WITHOUT maxAreas sweeps them all (fix: WP compile was capped at 6/9)", async () => {
     const seven = ["Wicker Park", "Bucktown", "Logan Square", "Avondale", "Humboldt Park", "East Village", "West Town"];
     const r = await runSweep({ areas: seven, providerFor }); // no maxAreas

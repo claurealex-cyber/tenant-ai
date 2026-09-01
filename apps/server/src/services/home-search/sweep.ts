@@ -17,6 +17,7 @@ export interface SweepResult {
   verified: number;
   upserted: number;
   newRows: number;
+  skipped?: boolean; // true when a sweep was already running (concurrency guard)
 }
 
 /**
@@ -25,13 +26,17 @@ export interface SweepResult {
  * neighborhood. Stores ALL verified active-quality listings regardless of price — the
  * dashboard filters price/location over the compiled dataset. Never throws.
  */
+let sweeping = false; // one sweep at a time (guards double-click / cron overlap)
+
 export async function runSweep(opts: SweepOptions = {}): Promise<SweepResult> {
   const now = opts.now ?? new Date();
   const provider = (opts.providerFor ?? (() => makeSearchProvider()))();
   const list = opts.areas && opts.areas.length ? opts.areas : WICKER_PARK_CLUSTER;
   const names = opts.maxAreas ? list.slice(0, opts.maxAreas) : list; // cap only when a budget is set
   const res: SweepResult = { areasSwept: [], discovered: 0, verified: 0, upserted: 0, newRows: 0 };
-
+  if (sweeping) { console.warn("[home-search sweep] already running — skipped"); return { ...res, skipped: true }; }
+  sweeping = true;
+  try {
   for (const name of names) {
     const area = areaByName(name) ?? { name, zips: [] as string[], priority: 2 };
     res.areasSwept.push(name);
@@ -77,6 +82,7 @@ export async function runSweep(opts: SweepOptions = {}): Promise<SweepResult> {
   }
   console.log(`[home-search sweep] areas [${res.areasSwept.join(", ")}] → discovered ${res.discovered}, verified ${res.verified}, new ${res.newRows}`);
   return res;
+  } finally { sweeping = false; }
 }
 
 /** Rolling city-wide sweep: rotate through ALL Chicago areas maxAreas at a time,
