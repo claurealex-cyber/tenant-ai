@@ -132,6 +132,35 @@ request.
 - Rollback = Off chip (or `set-config zillow fast_poll_sec 0`); the scheduled
   cadence is always the fallback.
 
+## BUILD RECORD (2026-08-31) — M1–M3 BUILT + DEPLOYED, stress-gated
+
+- **M1** `ZILLOW_POLL_FLOOR_SEC`/`ZILLOW_POLL_MAX_SEC` +
+  `normalizePollIntervalSec`/`pollMinutesToSeconds` in
+  `packages/shared/src/zillow-schedule.ts`; server re-exports
+  `POLL_FLOOR_SEC` (zero call-site churn — untouched poll suites prove no
+  drift); `getPollStatus` gains configuredSec/floorSec/transport/method/
+  autoEnabled. Gate: 15 shared clamp-table tests + status-shape tests
+  (incl. sub-floor config 60→effective 120) green.
+- **M2** POST-only `/api/admin/zillow/realtime`: shared validation (null →
+  400 pre-write), encrypted upsert, audit `zillow_poll_interval_update`
+  old→new + `clamped` flag, double cache refresh, response echoes the
+  server's realtime block. Gate: 8 route tests (403/400/clamp/off/max/
+  refresh-fallback/status-fallback) green.
+- **M3** always-rendered four-state `RealtimePollSection` in AutomationPanel
+  (P1 fixed: the editor exists in ALL states); chips Off/1min🔒/2/3/5/10 +
+  custom; clamp feedback named; pure state machine `realtime-ui.ts`
+  (13 tests: state priority, chip selection from the EFFECTIVE interval,
+  custom detection, messages). turbo build 4/4.
+- Full repo suite green except the PRE-EXISTING billing-cycle parallel-DB
+  flake (solo-green twice; file unchanged since initial commit — same
+  interference class root-fixed in the zillow suites, lives in foreign
+  fixtures).
+- **Deployed** 2026-08-31 ~22:20 CDT via the launchd sequence (committed
+  `126f1fe` first so start.sh rebuilds committed state).
+- **M6 remaining (owner, ~1 min in the dashboard):** click 2 min → watch the
+  cadence tighten and the audit row; click Off → amber state; restore 3 min.
+  M4 (ceiling editor) and M5 (60 s override) remain optional/on-request.
+
 ## Owner decisions
 1. Keep the 2-min floor (recommended) or request the M5 override?
 2. Presets Off/2/3/5/10 ok?
