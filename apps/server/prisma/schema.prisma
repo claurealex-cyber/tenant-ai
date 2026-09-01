@@ -843,3 +843,38 @@ model ChicagoListing {
   @@index([neighborhood])
   @@index([price])
 }
+
+model ExplorerListing {
+  id           String   @id @default(cuid())
+  listingId    String   @unique // dedup: normalized address+unit
+  source       String   // rentcast | movoto | compass | ...
+  sourceUrl    String?
+  address      String
+  unit         String?
+  zip          String?
+  neighborhood String?
+  lat          Float?
+  lng          Float?
+  price        Int?
+  beds         Int?
+  baths        Float?
+  sqft         Int?
+  propertyType String   // single_family | condo | townhome | multi
+  typeSource   String?  // how the type was decided (signal|label)
+  mlsNumber    String?
+  status       String   @default("active")
+  verifiedAt   DateTime?
+  listedDate   DateTime?
+  daysOnMarket Int?
+  hoa          Int?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  priceHistory Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([status])
+  @@index([propertyType])
+  @@index([neighborhood])
+  @@index([price])
+}
