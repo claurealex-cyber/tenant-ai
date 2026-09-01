@@ -28,7 +28,8 @@ export interface SweepResult {
 export async function runSweep(opts: SweepOptions = {}): Promise<SweepResult> {
   const now = opts.now ?? new Date();
   const provider = (opts.providerFor ?? (() => makeSearchProvider()))();
-  const names = (opts.areas && opts.areas.length ? opts.areas : WICKER_PARK_CLUSTER).slice(0, opts.maxAreas ?? 6);
+  const list = opts.areas && opts.areas.length ? opts.areas : WICKER_PARK_CLUSTER;
+  const names = opts.maxAreas ? list.slice(0, opts.maxAreas) : list; // cap only when a budget is set
   const res: SweepResult = { areasSwept: [], discovered: 0, verified: 0, upserted: 0, newRows: 0 };
 
   for (const name of names) {

@@ -205,7 +205,7 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
       const b = request.body ?? {};
       const result = b.rolling
         ? await runRollingSweep(b.maxAreas ?? 6, { priceAnchor: b.priceAnchor ?? null })
-        : await runSweep({ areas: b.areas, priceAnchor: b.priceAnchor ?? null, maxAreas: b.maxAreas ?? 6 });
+        : await runSweep({ areas: b.areas, priceAnchor: b.priceAnchor ?? null, maxAreas: b.maxAreas });
       return reply.send({ ok: true, sweep: result });
     },
   );

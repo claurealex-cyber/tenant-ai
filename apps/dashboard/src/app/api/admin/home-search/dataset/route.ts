@@ -16,7 +16,7 @@ async function admin() {
 export async function GET(request: NextRequest) {
   if (!(await admin())) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   const sp = new URL(request.url).searchParams;
-  const num = (k: string) => (sp.get(k) ? Number(sp.get(k)) : undefined);
+  const num = (k: string) => { const v = sp.get(k); if (!v) return undefined; const n = Number(v); return Number.isFinite(n) ? n : undefined; };
   const priceMin = num("priceMin");
   const priceMax = num("priceMax");
   const beds = num("beds");

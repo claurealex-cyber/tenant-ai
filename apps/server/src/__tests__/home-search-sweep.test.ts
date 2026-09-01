@@ -42,4 +42,10 @@ describe("home-search city-wide sweep", () => {
     const r = await runSweep({ areas: ["Wicker Park", "Bucktown", "Logan Square"], maxAreas: 2, providerFor });
     expect(r.areasSwept).toHaveLength(2);
   });
+
+  it("explicit areas WITHOUT maxAreas sweeps them all (fix: WP compile was capped at 6/9)", async () => {
+    const seven = ["Wicker Park", "Bucktown", "Logan Square", "Avondale", "Humboldt Park", "East Village", "West Town"];
+    const r = await runSweep({ areas: seven, providerFor }); // no maxAreas
+    expect(r.areasSwept).toHaveLength(7);
+  });
 });

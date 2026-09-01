@@ -60,6 +60,16 @@ describe("SearchProvider — #1 snippet extraction + #2 readable-source verify",
     expect(v).toBeNull();
   });
 
+  it("does NOT mis-parse a 7-figure price as a low <=250k number (B3)", async () => {
+    const fetch = vi.fn(async (url: string) =>
+      url.includes("brave") ? res({ web: { results: [braveResult("https://www.movoto.com/z", "1234 W Foo St #5 — $1,250,000", "2 bd condo for sale")] } }) : res("")) as unknown as Fetcher;
+    const p = makeSearchProvider({ fetch });
+    const cands = await p.discover({ areaTag: "X", zips: [] });
+    expect(cands).toHaveLength(1);
+    // $1,250,000 must never become 250000 (a false <=250k). Null or the real value only.
+    expect(cands[0].priceHint === null || cands[0].priceHint! >= 1_000_000).toBe(true);
+  });
+
   it("no search key → discover no-op (fail-soft)", async () => {
     delete cfg["home_search.search_api_key"];
     const p = makeSearchProvider({ fetch: (async () => res({})) as unknown as Fetcher });

@@ -31,7 +31,7 @@ function parseCandidate(res: any): Candidate | null {
   const raw = `${res?.title ?? ""} ${res?.description ?? ""}`;
   if (!res?.url) return null;
   const text = raw.replace(/[\d,]+\s*sq\.?\s?ft/gi, " "); // strip sqft so it never leaks into the address
-  const priceHint = Number((text.match(/\$\s?([\d]{2,3},[\d]{3})/)?.[1] || "").replace(/,/g, "")) || null;
+  const priceHint = Number((text.match(/\$\s?([\d]{1,3}(?:,\d{3})+)/)?.[1] || "").replace(/,/g, "")) || null;
   const bedsHint = Number(text.match(/(\d+)\s*(?:bd|beds?|bedrooms?)/i)?.[1]) || null;
   const addr = text.match(/\d+\s+[NSEW]?\.?\s*[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,3}\s+(?:St|Ave|Blvd|Dr|Ct|Pl|Rd|Ln|Way|Ter)\b/)?.[0];
   if (!addr) return null;
@@ -141,7 +141,7 @@ const defaultExtractor: Extractor = async (pageText, candidate) => {
   else if (/\bpending\b/.test(t)) status = "pending";
   else if (/\b(for sale|active|list price|listed for)\b/.test(t)) status = "active";
   if (status !== "active") return null;
-  const price = candidate.priceHint ?? (Number((pageText.match(/\$\s?([\d]{2,3},[\d]{3})/)?.[1] || "").replace(/,/g, "")) || null);
+  const price = candidate.priceHint ?? (Number((pageText.match(/\$\s?([\d]{1,3}(?:,\d{3})+)/)?.[1] || "").replace(/,/g, "")) || null);
   const beds = candidate.bedsHint ?? (Number(pageText.match(/(\d+)\s*(?:bd|beds?|bedrooms?)/i)?.[1]) || null);
   const sqft = Number((pageText.match(/([\d,]{3,5})\s*(?:sq\.?\s?ft|sqft|square feet)/i)?.[1] || "").replace(/,/g, "")) || null;
   return { status, price, beds, sqft, remarks: null, isQuality: true };
