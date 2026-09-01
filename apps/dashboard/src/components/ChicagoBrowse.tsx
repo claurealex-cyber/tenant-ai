@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface Row {
   id: string; address: string; unit: string | null; zip: string | null; neighborhood: string | null;
@@ -25,6 +25,7 @@ export default function ChicagoBrowse() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const pageSize = 50;
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetch("/api/admin/home-search/areas").then((r) => (r.ok ? r.json() : { clusters: [] })).then((d) => setClusters(d.clusters || [])).catch(() => {});
@@ -38,11 +39,22 @@ export default function ChicagoBrowse() {
     if (q) p.set("q", q);
     if (sel.size) p.set("neighborhoods", [...sel].join(","));
     p.set("sort", sort); p.set("page", String(page)); p.set("pageSize", String(pageSize));
-    const r = await fetch(`/api/admin/home-search/dataset?${p.toString()}`, { cache: "no-store" });
-    if (r.ok) setData(await r.json());
+    abortRef.current?.abort();               // cancel any in-flight request (T1: no stale/races)
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      const r = await fetch(`/api/admin/home-search/dataset?${p.toString()}`, { cache: "no-store", signal: ctrl.signal });
+      if (r.ok) setData(await r.json());
+    } catch (e) {
+      if ((e as any)?.name === "AbortError") return; // superseded request — ignore
+      setMsg(e instanceof Error ? e.message : "could not load listings");
+    }
   }, [priceMin, priceMax, beds, q, sel, sort, page]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const t = setTimeout(() => { load(); }, 300); // debounce rapid filter typing
+    return () => clearTimeout(t);
+  }, [load]);
 
   const toggleArea = (a: string) => {
     setPage(1);
@@ -85,7 +97,7 @@ export default function ChicagoBrowse() {
         <L label="Min price"><input className="in" value={priceMin} onChange={(e) => { setPage(1); setPriceMin(e.target.value); }} inputMode="numeric" placeholder="any" /></L>
         <L label="Max price"><input className="in" value={priceMax} onChange={(e) => { setPage(1); setPriceMax(e.target.value); }} inputMode="numeric" placeholder="any" /></L>
         <L label="Min beds"><input className="in" value={beds} onChange={(e) => { setPage(1); setBeds(e.target.value); }} inputMode="numeric" placeholder="any" /></L>
-        <L label="Sort"><select className="in" value={sort} onChange={(e) => setSort(e.target.value)}><option value="price_asc">Price ↑</option><option value="price_desc">Price ↓</option><option value="newest">Newest</option></select></L>
+        <L label="Sort"><select className="in" value={sort} onChange={(e) => { setPage(1); setSort(e.target.value); }}><option value="price_asc">Price ↑</option><option value="price_desc">Price ↓</option><option value="newest">Newest</option></select></L>
         <L label="Address contains"><input className="in" value={q} onChange={(e) => { setPage(1); setQ(e.target.value); }} placeholder="e.g. Damen" /></L>
       </div>
 
