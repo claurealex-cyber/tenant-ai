@@ -805,3 +805,41 @@ model BuyerListing {
   @@index([searchId])
   @@index([status])
 }
+
+model ChicagoListing {
+  id           String   @id @default(cuid())
+  listingId    String   @unique // city-wide dedup: normalized address+unit
+  source       String
+  sourceUrl    String
+  canonicalUrl String?
+  address      String
+  unit         String?
+  zip          String?
+  neighborhood String?  // assigned at sweep time (the query's neighborhood)
+  communityArea String?
+  lat          Float?
+  lng          Float?
+  price        Int?
+  beds         Int?
+  baths        Float?
+  sqft         Int?
+  propertyType String?
+  mlsNumber    String?
+  status       String   @default("active")
+  verifiedAt   DateTime?
+  listedDate   DateTime?
+  daysOnMarket Int?
+  hoa          Int?
+  remarks      String?
+  qualityFlags String[]
+  isQuality    Boolean  @default(true)
+  priceHistory Json?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([status])
+  @@index([neighborhood])
+  @@index([price])
+}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import DashboardShell from "@/components/layout/DashboardShell";
+import ChicagoBrowse from "@/components/ChicagoBrowse";
 
 interface SearchRow {
   id: string;
@@ -147,6 +148,8 @@ export default function HomeSearchPage() {
         </div>
 
         {err && <div className="mb-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{err}</div>}
+
+        <ChicagoBrowse />
 
         {creating && (
           <div className="mb-6 rounded-lg border border-gray-200 bg-white p-4">

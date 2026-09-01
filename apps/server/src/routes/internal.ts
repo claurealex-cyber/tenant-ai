@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { resolveConfig, clearConfigCache } from "@tenant-ai/shared";
 import { resolveRoutingStatus } from "../services/routing-status.js";
 import { runSearch, runAllEnabled } from "../services/home-search/engine.js";
+import { runSweep, runRollingSweep } from "../services/home-search/sweep.js";
 import { relaySendWithGuards } from "../services/relay-guards.js";
 import { prisma } from "../lib/prisma.js";
 import { runZillowImport, leadsToCsv } from "../services/zillow-import.js";
@@ -192,6 +193,20 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
       const id = request.body?.searchId;
       const result = id ? [await runSearch(id)] : await runAllEnabled();
       return reply.send({ ok: true, runs: result });
+    },
+  );
+
+  /** POST /internal/home-search/sweep — compile listings city-wide into the dataset.
+   *  {areas?} sweeps named neighborhoods; else a rolling slice (WP cluster first). */
+  server.post<{ Body: { areas?: string[]; priceAnchor?: number; maxAreas?: number; rolling?: boolean } }>(
+    "/internal/home-search/sweep",
+    { preHandler: requireInternalSecret },
+    async (request, reply: FastifyReply) => {
+      const b = request.body ?? {};
+      const result = b.rolling
+        ? await runRollingSweep(b.maxAreas ?? 6, { priceAnchor: b.priceAnchor ?? null })
+        : await runSweep({ areas: b.areas, priceAnchor: b.priceAnchor ?? null, maxAreas: b.maxAreas ?? 6 });
+      return reply.send({ ok: true, sweep: result });
     },
   );
 
