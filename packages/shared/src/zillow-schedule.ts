@@ -136,3 +136,40 @@ export function scheduleSummary(i: ScheduleSummaryInput): ScheduleSummary {
     timezone: SCHEDULE_TIMEZONE,
   };
 }
+
+// ── Real-time poll interval (interval-editor plan rev.2 M1) ─────────────────
+
+/** Hard floor for the fast-poll interval. Each poll is a FULL Safari scrape of
+ *  Zillow (anti-bot exposure + GUI-lock occupancy), so the ENGINE clamps to
+ *  this regardless of what any UI writes. Single source of truth (P4) — the
+ *  server re-exports it as POLL_FLOOR_SEC. */
+export const ZILLOW_POLL_FLOOR_SEC = 120;
+/** Upper bound — beyond an hour, use the scheduled runs instead. */
+export const ZILLOW_POLL_MAX_SEC = 3600;
+
+/**
+ * Normalize a requested poll interval (seconds):
+ *   0 / "0" / "off" / false → 0 (polling off)
+ *   positive number/string  → rounded and clamped to [floor, max]
+ *   anything else (negative, NaN, empty, null) → null — reject, never guess.
+ */
+export function normalizePollIntervalSec(raw: unknown): number | null {
+  if (raw === 0 || raw === "0" || raw === "off" || raw === false) return 0;
+  const n =
+    typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n === 0) return 0;
+  return Math.min(ZILLOW_POLL_MAX_SEC, Math.max(ZILLOW_POLL_FLOOR_SEC, Math.round(n)));
+}
+
+/** Minutes → normalized seconds (same contract as normalizePollIntervalSec). */
+export function pollMinutesToSeconds(minutes: unknown): number | null {
+  const n =
+    typeof minutes === "number"
+      ? minutes
+      : typeof minutes === "string" && minutes.trim() !== ""
+        ? Number(minutes)
+        : NaN;
+  if (!Number.isFinite(n) || n < 0) return null;
+  return normalizePollIntervalSec(n * 60);
+}

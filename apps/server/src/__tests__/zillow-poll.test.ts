@@ -251,12 +251,20 @@ describe("M5 — stall streak + poll status", () => {
 
   it("getPollStatus reports active + interval + ceiling; inert when fast_poll_sec=0", async () => {
     const s1 = await getPollStatus(nextNow());
-    expect(s1).toMatchObject({ active: true, fastPollSec: 180, windowStartHour: 8, windowEndHour: 22, inWindow: true, maxPerDay: 50 });
+    expect(s1).toMatchObject({
+      active: true, fastPollSec: 180, configuredSec: 180, floorSec: 120,
+      transport: "textemall", method: "api", autoEnabled: true,
+      windowStartHour: 8, windowEndHour: 22, inWindow: true, maxPerDay: 50,
+    });
     expect(typeof s1.sentToday).toBe("number");
     expect(typeof s1.ambiguousCount).toBe("number");
+    // Sub-floor config: effective interval is floored, raw value still reported.
+    cfg.fastPollSec = "60";
+    const sFloor = await getPollStatus(nextNow());
+    expect(sFloor).toMatchObject({ active: true, fastPollSec: 120, configuredSec: 60 });
     cfg.fastPollSec = "0";
     const s2 = await getPollStatus(nextNow());
-    expect(s2).toMatchObject({ active: false, fastPollSec: 0 });
+    expect(s2).toMatchObject({ active: false, fastPollSec: 0, configuredSec: 0 });
     const s3 = await getPollStatus(new Date(2003, 2, daySeq, 23, 30));
     expect(s3.inWindow).toBe(false);
   });

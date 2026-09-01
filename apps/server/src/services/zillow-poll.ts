@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { resolveConfig } from "@tenant-ai/shared";
+import { resolveConfig, ZILLOW_POLL_FLOOR_SEC } from "@tenant-ai/shared";
 import { isGuiBusy } from "../lib/gui-lock.js";
 import { runExclusiveCycle, isCycleSkipped } from "./zillow-cycle.js";
 import {
@@ -40,7 +40,9 @@ import { notifyOnMac } from "./messages-relay.js";
  */
 
 export const POLL_EVAL_MS = 30_000;
-export const POLL_FLOOR_SEC = 120;
+/** Re-export of the shared floor (rev.2 P4) — ONE source of truth; the shared
+ *  copy exists so the dashboard's validation can never drift from the engine. */
+export const POLL_FLOOR_SEC = ZILLOW_POLL_FLOOR_SEC;
 export const POLL_MIN_UPTIME_SEC = 120;
 
 export interface PollState {
@@ -266,6 +268,14 @@ export interface PollStatus {
   /** Polling is configured on (mode api + enabled + interval > 0). */
   active: boolean;
   fastPollSec: number;
+  /** Raw configured value of zillow.fast_poll_sec (pre-floor). */
+  configuredSec: number;
+  /** The engine's hard interval floor (UI must not hardcode it). */
+  floorSec: number;
+  /** Lane state — lets the UI explain WHY polling is dormant (rev.2 P1/P3). */
+  transport: "textemall" | "relay";
+  method: "api" | "form";
+  autoEnabled: boolean;
   windowStartHour: number;
   windowEndHour: number;
   inWindow: boolean;
@@ -293,6 +303,11 @@ export async function getPollStatus(now: Date = new Date()): Promise<PollStatus>
   return {
     active: delivery.transport === "textemall" && delivery.method === "api" && enabled && fastPollSec > 0,
     fastPollSec: fastPollSec > 0 ? Math.max(fastPollSec, POLL_FLOOR_SEC) : 0,
+    configuredSec: fastPollSec,
+    floorSec: POLL_FLOOR_SEC,
+    transport: delivery.transport,
+    method: delivery.method,
+    autoEnabled: enabled,
     windowStartHour: startHour,
     windowEndHour: endHour,
     inWindow: hour >= startHour && hour <= endHour,

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   normalizeRunHours, describeSchedule, nextRunLabelFor, runsPerDay, monthlyFireEstimate,
   scheduleSummary, DEFAULT_MONTHLY_FIRE_CAP, clampWindowHour,
+  normalizePollIntervalSec, pollMinutesToSeconds, ZILLOW_POLL_FLOOR_SEC, ZILLOW_POLL_MAX_SEC,
 } from "../zillow-schedule.js";
 
 describe("normalizeRunHours", () => {
@@ -63,5 +64,36 @@ describe("scheduleSummary", () => {
   });
   it("unsorted run hours are sorted", () => {
     expect(scheduleSummary({ ...base, runHours: [22, 10] }).hours).toEqual([10, 22]);
+  });
+});
+
+describe("normalizePollIntervalSec (realtime interval editor M1)", () => {
+  it("clamp table: off, floor, pass-through, max, reject", () => {
+    expect(normalizePollIntervalSec(0)).toBe(0);
+    expect(normalizePollIntervalSec("0")).toBe(0);
+    expect(normalizePollIntervalSec("off")).toBe(0);
+    expect(normalizePollIntervalSec(30)).toBe(120);
+    expect(normalizePollIntervalSec(119)).toBe(120);
+    expect(normalizePollIntervalSec(120)).toBe(120);
+    expect(normalizePollIntervalSec(180)).toBe(180);
+    expect(normalizePollIntervalSec(3600)).toBe(3600);
+    expect(normalizePollIntervalSec(5000)).toBe(3600);
+    expect(normalizePollIntervalSec("x")).toBeNull();
+    expect(normalizePollIntervalSec("")).toBeNull();
+    expect(normalizePollIntervalSec(-5)).toBeNull();
+    expect(normalizePollIntervalSec(null)).toBeNull();
+    expect(normalizePollIntervalSec(undefined)).toBeNull();
+  });
+  it("minutes helper shares the contract (1 min → clamped to the floor)", () => {
+    expect(pollMinutesToSeconds(1)).toBe(120);
+    expect(pollMinutesToSeconds(2)).toBe(120);
+    expect(pollMinutesToSeconds(3)).toBe(180);
+    expect(pollMinutesToSeconds(0)).toBe(0);
+    expect(pollMinutesToSeconds("x")).toBeNull();
+    expect(pollMinutesToSeconds(-1)).toBeNull();
+  });
+  it("the floor constant IS the engine's floor", () => {
+    expect(ZILLOW_POLL_FLOOR_SEC).toBe(120);
+    expect(ZILLOW_POLL_MAX_SEC).toBe(3600);
   });
 });

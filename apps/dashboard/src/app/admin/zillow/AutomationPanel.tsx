@@ -5,6 +5,9 @@ import {
   PRESETS, ALL_HOURS, SLEEPY_HOURS, applyPreset, toggleHour, matchingPreset, summaryFor, bodyFor,
   draftFromStatus, sameSchedule, fmtHour, type ScheduleDraft,
 } from "./schedule-ui";
+import {
+  realtimeStateFor, presetChips, isCustomInterval, saveMessage, realtimeHeadline,
+} from "./realtime-ui";
 
 /** Human cadence label: fixed 3×/day hours when configured, else the hourly window. */
 function cadenceLabel(runHours?: number[] | null, startHour?: number, endHour?: number): string {
@@ -60,6 +63,11 @@ interface AutoStatus {
   realtime?: {
     active: boolean;
     fastPollSec: number;
+    configuredSec: number;
+    floorSec: number;
+    transport: "textemall" | "relay";
+    method: "api" | "form";
+    autoEnabled: boolean;
     windowStartHour: number;
     windowEndHour: number;
     inWindow: boolean;
@@ -78,6 +86,151 @@ function labelFor(status: AutoStatus | null): string {
 }
 
 const MILESTONES = [25, 50, 100, 200];
+
+/**
+ * Real-time polling section (interval-editor plan rev.2 M3). ALWAYS rendered
+ * when the server reports a realtime block — the editor must exist in every
+ * state (the rev.1 bug hid it exactly when you needed it to turn polling on).
+ * Four states via realtimeStateFor: active / off / dormant_lane / dormant_auto.
+ */
+function RealtimePollSection({
+  realtime,
+  onSaved,
+}: {
+  realtime: NonNullable<AutoStatus["realtime"]>;
+  onSaved: () => Promise<void> | void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [custom, setCustom] = useState("");
+  const state = realtimeStateFor(realtime);
+  const chips = presetChips(realtime);
+  const customActive = isCustomInterval(realtime);
+
+  const save = async (body: { minutes?: number; off?: boolean }) => {
+    if (saving) return;
+    setSaving(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/admin/zillow/realtime", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `save failed (${res.status})`);
+      setMsg({ kind: "ok", text: saveMessage(j, realtime.floorSec) });
+      setCustom("");
+      await onSaved();
+    } catch (e) {
+      setMsg({ kind: "err", text: e instanceof Error ? e.message : "save failed" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const tone =
+    state === "active"
+      ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+      : state === "off"
+        ? "border-amber-300 bg-amber-50 text-amber-900"
+        : "border-gray-300 bg-gray-50 text-gray-700";
+
+  return (
+    <div className={`rounded-md border px-4 py-3 text-sm ${tone}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-semibold">{realtimeHeadline(state, realtime)}</span>
+        {state === "active" && (
+          <span className="text-xs">
+            {realtime.lastPollAt
+              ? `last poll ${new Date(realtime.lastPollAt).toLocaleTimeString()}`
+              : "no poll yet"}
+            {` · sent today ${realtime.sentToday}${realtime.maxPerDay ? `/${realtime.maxPerDay}` : ""}`}
+            {realtime.ambiguousCount > 0 && (
+              <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                {realtime.ambiguousCount} unverified on hold
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+      {state === "dormant_lane" && (
+        <p className="mt-1 text-xs">
+          Switch <span className="font-medium">Zillow broadcast delivery</span> below to{" "}
+          <span className="font-medium">Text-Em-All · Direct API</span> to activate. The interval you
+          pick here is kept for when you do.
+        </p>
+      )}
+      {state === "dormant_auto" && (
+        <p className="mt-1 text-xs">
+          Turn <span className="font-medium">Automation</span> ON above to activate. The interval you
+          pick here is kept for when you do.
+        </p>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {chips.map((c) => (
+          <button
+            key={c.label}
+            type="button"
+            disabled={saving || c.locked}
+            title={
+              c.locked
+                ? `Minimum is ${Math.round(realtime.floorSec / 60)} min — each poll is a full Zillow scrape (anti-bot)`
+                : undefined
+            }
+            onClick={() => save(c.minutes === null ? { off: true } : { minutes: c.minutes })}
+            className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${
+              c.selected
+                ? "border-blue-500 bg-blue-100 text-blue-800"
+                : c.locked
+                  ? "cursor-not-allowed border-gray-200 text-gray-400"
+                  : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"
+            } ${saving ? "opacity-60" : ""}`}
+          >
+            {c.label}
+            {c.locked ? " 🔒" : ""}
+          </button>
+        ))}
+        <span className="ml-1 flex items-center gap-1 text-xs">
+          <input
+            value={custom}
+            onChange={(e) => setCustom(e.target.value)}
+            placeholder={
+              customActive
+                ? `${Math.round(Math.max(realtime.configuredSec, realtime.floorSec) / 60)}`
+                : "custom"
+            }
+            className="w-16 rounded border border-gray-300 px-1.5 py-0.5 text-xs"
+          />
+          min
+          <button
+            type="button"
+            disabled={saving || custom.trim() === ""}
+            onClick={() => {
+              const m = Number(custom);
+              if (!Number.isFinite(m)) {
+                setMsg({ kind: "err", text: "custom interval must be a number of minutes" });
+                return;
+              }
+              save({ minutes: m });
+            }}
+            className="rounded border border-gray-300 bg-white px-2 py-0.5 text-xs hover:border-gray-400 disabled:opacity-50"
+          >
+            Set
+          </button>
+        </span>
+      </div>
+      {state === "active" && (
+        <p className="mt-1 text-[11px] opacity-70">Changes apply within a minute — no restart needed.</p>
+      )}
+      {msg && (
+        <p className={`mt-1 text-xs ${msg.kind === "ok" ? "text-emerald-800" : "text-red-700"}`}>
+          {msg.text}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function StatusChip({ status }: { status: string }) {
   const styles: Record<string, string> = {
@@ -247,24 +400,7 @@ export default function AutomationPanel({ newLeadCount }: { newLeadCount: number
           restarted with Redis up. &quot;Run now&quot; still works.
         </div>
       )}
-      {status.realtime?.active && (
-        <div className="rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-          <span className="font-semibold">Real-time mode:</span> Zillow scrape every ~
-          {Math.max(1, Math.round(status.realtime.fastPollSec / 60))} min,{" "}
-          {String(status.realtime.windowStartHour).padStart(2, "0")}:00–
-          {String(status.realtime.windowEndHour).padStart(2, "0")}:59
-          {status.realtime.lastPollAt
-            ? ` · last poll ${new Date(status.realtime.lastPollAt).toLocaleTimeString()}`
-            : " · no poll yet"}
-          {` · sent today ${status.realtime.sentToday}${status.realtime.maxPerDay ? `/${status.realtime.maxPerDay}` : ""}`}
-          <span className="text-emerald-700"> (setting changes apply within a minute)</span>
-          {status.realtime.ambiguousCount > 0 && (
-            <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
-              {status.realtime.ambiguousCount} unverified broadcast{status.realtime.ambiguousCount > 1 ? "s" : ""} on hold
-            </span>
-          )}
-        </div>
-      )}
+      {status.realtime && <RealtimePollSection realtime={status.realtime} onSaved={load} />}
 
       <div className="rounded-lg border border-gray-200 bg-white p-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
