@@ -16,7 +16,7 @@ const TYPES: { key: string; label: string }[] = [
 ];
 const TYPE_STYLE: Record<string, string> = { single_family: "bg-emerald-50 text-emerald-700", condo: "bg-blue-50 text-blue-700", townhome: "bg-violet-50 text-violet-700", multi: "bg-amber-50 text-amber-700" };
 
-export default function ListingsExplorer() {
+export default function ListingsExplorer({ provider = "rentcast" }: { provider?: "rentcast" | "public" }) {
   const [clusters, setClusters] = useState<Cluster[]>([]);
   const [areaSel, setAreaSel] = useState<Set<string>>(new Set());
   const [typeSel, setTypeSel] = useState<Set<string>>(new Set());
@@ -80,14 +80,14 @@ export default function ListingsExplorer() {
       <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Listings Explorer</h2>
-          <p className="text-xs text-gray-500">All property types via RentCast (licensed). Filter by type, price, and neighborhood.</p>
+          <p className="text-xs text-gray-500">{provider === "public" ? "All types from public Movoto index pages (free, links out). Filter by type, price, neighborhood." : "All property types via RentCast (licensed). Filter by type, price, and neighborhood."}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {areaSel.size > 0 && (
-            <button onClick={() => { const b = [...areaSel].slice(0, 8); compile({ areas: b, types: typeSel.size ? [...typeSel] : undefined }, `${b.length} area(s)`); }} disabled={busy}
+            <button onClick={() => { const b = [...areaSel].slice(0, 8); compile({ areas: b, provider, types: typeSel.size ? [...typeSel] : undefined }, `${b.length} area(s)`); }} disabled={busy}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">Compile selected ({areaSel.size})</button>
           )}
-          <button onClick={() => compile({ rolling: true, maxAreas: 6, types: typeSel.size ? [...typeSel] : undefined }, "more of Chicago")} disabled={busy}
+          <button onClick={() => compile({ rolling: true, maxAreas: 6, provider, types: typeSel.size ? [...typeSel] : undefined }, "more of Chicago")} disabled={busy}
             className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-gray-400 disabled:opacity-50">Compile more of Chicago</button>
         </div>
       </div>

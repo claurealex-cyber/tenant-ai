@@ -34,6 +34,7 @@ const adminNavItems = [
   { label: "Zillow Leads", href: "/admin/zillow", icon: "briefcase" },
   { label: "Home Search", href: "/admin/home-search", icon: "search" },
   { label: "Listings Explorer", href: "/admin/listings-explorer", icon: "grid" },
+  { label: "Chicago Listings", href: "/admin/chicago-listings", icon: "grid" },
   { label: "SMS Leads", href: "/admin/sms-leads", icon: "chat" },
   { label: "System", href: "/admin/system", icon: "server" },
   { label: "Audit Log", href: "/admin/audit", icon: "clipboard" },

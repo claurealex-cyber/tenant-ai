@@ -5,6 +5,8 @@ import { resolveRoutingStatus } from "../services/routing-status.js";
 import { runSearch, runAllEnabled } from "../services/home-search/engine.js";
 import { runSweep, runRollingSweep } from "../services/home-search/sweep.js";
 import { compileAreas, compileRolling } from "../services/listings-explorer/engine.js";
+import { makeRentCastProvider } from "../services/listings-explorer/rentcast-provider.js";
+import { makePublicIndexProvider } from "../services/listings-explorer/public-index-provider.js";
 import { relaySendWithGuards } from "../services/relay-guards.js";
 import { prisma } from "../lib/prisma.js";
 import { runZillowImport, leadsToCsv } from "../services/zillow-import.js";
@@ -213,15 +215,17 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
 
   /** POST /internal/listings-explorer/compile — RentCast all-types compile into
    *  ExplorerListing. {areas?} or {rolling:true}; optional types[]/priceMax filter. */
-  server.post<{ Body: { areas?: string[]; rolling?: boolean; maxAreas?: number; types?: string[]; priceMax?: number; priceMin?: number; beds?: number } }>(
+  server.post<{ Body: { areas?: string[]; rolling?: boolean; maxAreas?: number; types?: string[]; priceMax?: number; priceMin?: number; beds?: number; provider?: string } }>(
     "/internal/listings-explorer/compile",
     { preHandler: requireInternalSecret },
     async (request, reply: FastifyReply) => {
       const b = request.body ?? {};
       const filter = { types: b.types as any, priceMax: b.priceMax ?? null, priceMin: b.priceMin ?? null, beds: b.beds ?? null };
+      // provider: "public" (free Movoto index, no key) | "rentcast" (licensed). Default public.
+      const provider = b.provider === "rentcast" ? makeRentCastProvider() : makePublicIndexProvider();
       const result = b.rolling
-        ? await compileRolling(b.maxAreas ?? 6, filter)
-        : await compileAreas(b.areas ?? [], filter);
+        ? await compileRolling(b.maxAreas ?? 6, filter, { provider })
+        : await compileAreas(b.areas ?? [], filter, { provider });
       return reply.send({ ok: true, compile: result });
     },
   );
