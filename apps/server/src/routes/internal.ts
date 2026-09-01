@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { resolveConfig, clearConfigCache } from "@tenant-ai/shared";
 import { resolveRoutingStatus } from "../services/routing-status.js";
+import { runSearch, runAllEnabled } from "../services/home-search/engine.js";
 import { relaySendWithGuards } from "../services/relay-guards.js";
 import { prisma } from "../lib/prisma.js";
 import { runZillowImport, leadsToCsv } from "../services/zillow-import.js";
@@ -180,6 +181,17 @@ export async function internalRoutes(server: FastifyInstance): Promise<void> {
     { preHandler: requireInternalSecret },
     async (_request, reply: FastifyReply) => {
       return reply.send(await resolveRoutingStatus());
+    },
+  );
+
+  /** POST /internal/home-search/run — run one saved search (searchId) or all enabled. */
+  server.post<{ Body: { searchId?: string } }>(
+    "/internal/home-search/run",
+    { preHandler: requireInternalSecret },
+    async (request, reply: FastifyReply) => {
+      const id = request.body?.searchId;
+      const result = id ? [await runSearch(id)] : await runAllEnabled();
+      return reply.send({ ok: true, runs: result });
     },
   );
 

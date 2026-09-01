@@ -32,6 +32,7 @@ const adminNavItems = [
   { label: "Survey Responses", href: "/admin/surveys", icon: "clipboard" },
   { label: "SMS Relay", href: "/admin/sms-relay", icon: "chat" },
   { label: "Zillow Leads", href: "/admin/zillow", icon: "briefcase" },
+  { label: "Home Search", href: "/admin/home-search", icon: "search" },
   { label: "SMS Leads", href: "/admin/sms-leads", icon: "chat" },
   { label: "System", href: "/admin/system", icon: "server" },
   { label: "Audit Log", href: "/admin/audit", icon: "clipboard" },
@@ -124,6 +125,12 @@ function NavIcon({ icon, className }: { icon: string; className?: string }) {
       return (
         <svg className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.54a4.5 4.5 0 00-6.364-6.364L4.5 8.25l4.5 4.5" />
+        </svg>
+      );
+    case "search":
+      return (
+        <svg className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
         </svg>
       );
     case "server":

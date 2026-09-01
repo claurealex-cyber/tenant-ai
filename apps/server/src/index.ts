@@ -23,6 +23,7 @@ import { lateFeeJob } from "./jobs/late-fee.js";
 import { depositRemindersJob } from "./jobs/deposit-reminders.js";
 import { leaseExpirationJob } from "./jobs/lease-expiration.js";
 import { smsCleanupJob } from "./jobs/sms-cleanup.js";
+import { homeSearchJob } from "./jobs/home-search.js";
 import { zillowDailyJob } from "./jobs/zillow-daily.js";
 import { individualRelayJob } from "./jobs/individual-relay.js";
 import { registerShutdownHandlers } from "./lib/graceful-shutdown.js";
@@ -94,7 +95,7 @@ startZillowFastPoll((msg) => server.log.info(msg));
 // Background jobs — registered AFTER listen so a hung Redis connection can
 // never block the webhook endpoint from coming up. Each registration races a
 // 10s timeout: Redis absence degrades (logged, skipped) instead of hanging.
-const jobs = [billingCycleJob, rentPostingJob, lateFeeJob, depositRemindersJob, leaseExpirationJob, smsCleanupJob, zillowDailyJob, individualRelayJob];
+const jobs = [billingCycleJob, rentPostingJob, lateFeeJob, depositRemindersJob, leaseExpirationJob, smsCleanupJob, zillowDailyJob, individualRelayJob, homeSearchJob];
 for (const job of jobs) {
   try {
     await Promise.race([

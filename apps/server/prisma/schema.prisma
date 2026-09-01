@@ -739,3 +739,69 @@ model ZillowAutoRun {
 
   @@index([day])
 }
+
+model BuyerSearch {
+  id           String    @id @default(cuid())
+  label        String
+  enabled      Boolean   @default(true)   // search runs
+  alertsArmed  Boolean   @default(false)  // texts new matches (ships OFF)
+  notifyPhone  String
+  priceMax     Int?
+  priceMin     Int?
+  beds         Int?
+  baths        Float?
+  propertyType String?
+  zips         String[]
+  centerLat    Float?
+  centerLng    Float?
+  radiusMi     Float?
+  keywords     String?
+  provider     String    @default("search") // search | fixture | rentcast
+  lastRunAt    DateTime?
+  lastRunCount Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  listings     BuyerListing[]
+
+  @@index([enabled])
+}
+
+model BuyerListing {
+  id           String   @id @default(cuid())
+  searchId     String
+  search       BuyerSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+  listingId    String   // stable: hash of normalized address+unit
+  source       String
+  sourceUrl    String
+  canonicalUrl String?
+  address      String
+  unit         String?
+  zip          String?
+  lat          Float?
+  lng          Float?
+  price        Int?
+  beds         Int?
+  baths        Float?
+  sqft         Int?
+  propertyType String?
+  mlsNumber    String?
+  status       String   @default("active") // active | contingent | pending | closed | removed | stale
+  verifiedAt   DateTime?
+  listedDate   DateTime?
+  daysOnMarket Int?
+  hoa          Int?
+  remarks      String?
+  qualityFlags String[]
+  isQuality    Boolean  @default(true)
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  priceHistory Json?
+  areaTag      String?
+  notified     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([searchId, listingId])
+  @@index([searchId])
+  @@index([status])
+}
