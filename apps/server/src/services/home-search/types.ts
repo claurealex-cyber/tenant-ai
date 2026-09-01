@@ -19,6 +19,7 @@ export interface Candidate {
   priceHint?: number | null;
   bedsHint?: number | null;
   mlsHint?: string | null;
+  snippet?: string | null; // Brave title+description — the #1 snippet-extraction source
 }
 
 /** Verified, normalized listing — what gets persisted + alerted. */
