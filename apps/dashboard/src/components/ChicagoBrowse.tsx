@@ -84,8 +84,12 @@ export default function ChicagoBrowse() {
           <p className="text-xs text-gray-500">Compiled from public MLS-fed sources. Filter by price and neighborhood; addresses shown.</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {sel.size > 0 && (
+            <button onClick={() => sweep({ areas: [...sel] }, `${sel.size} selected area(s)`)} disabled={busy}
+              className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">Compile selected ({sel.size})</button>
+          )}
           <button onClick={() => sweep({ areas: clusters[0]?.areas ?? [] }, "Wicker Park area")} disabled={busy}
-            className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">Compile Wicker Park area</button>
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-gray-400 disabled:opacity-50">Compile Wicker Park area</button>
           <button onClick={() => sweep({ rolling: true, maxAreas: 6 }, "more of Chicago")} disabled={busy}
             className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-gray-400 disabled:opacity-50">Compile more of Chicago</button>
         </div>
@@ -127,7 +131,7 @@ export default function ChicagoBrowse() {
             <th className="px-3 py-2">Price</th><th className="px-3 py-2">Address</th><th className="px-3 py-2">Area</th><th className="px-3 py-2">Bd/Ba</th><th className="px-3 py-2">Sqft</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">DOM</th><th className="px-3 py-2"></th>
           </tr></thead>
           <tbody>
-            {data.listings.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-400">No listings match — adjust filters, or compile an area above.</td></tr>}
+            {data.listings.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-400">{sel.size > 0 ? `No listings for the selected area(s) yet — click \u201cCompile selected (${sel.size})\u201d above to fetch them.` : "No listings match — adjust filters, or compile an area above."}</td></tr>}
             {data.listings.map((l) => (
               <tr key={l.id} className="border-t border-gray-50">
                 <td className="px-3 py-2 font-medium tabular-nums text-gray-900">{usd(l.price)}</td>
